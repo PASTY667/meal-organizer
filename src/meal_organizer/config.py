@@ -50,29 +50,36 @@ def _csv(value: str | None) -> list[str]:
 
 
 def _env_values() -> dict[str, str]:
+    """Load the persistent app .env, then overlay explicit process environment values."""
     ensure_app_dir()
-    values = {key: value for key, value in dotenv_values(ENV_PATH).items() if value is not None}
+    values: dict[str, str] = {}
+    if ENV_PATH.exists():
+        values.update({key: value for key, value in dotenv_values(ENV_PATH).items() if value is not None})
     values.update({key: value for key, value in os.environ.items() if key.startswith("MEAL_ORGANIZER_")})
     return values
 
 
 def load_config() -> UserConfig:
+    """Load configuration from ~/.meal-organizer/.env without silently discarding values."""
     values = _env_values()
-    return UserConfig(
-        name=values.get("MEAL_ORGANIZER_NAME", ""),
-        servings=int(values.get("MEAL_ORGANIZER_SERVINGS", "1")),
-        weekly_budget=float(values.get("MEAL_ORGANIZER_WEEKLY_BUDGET", "50")),
-        allergies=_csv(values.get("MEAL_ORGANIZER_ALLERGIES")),
-        dislikes=_csv(values.get("MEAL_ORGANIZER_DISLIKES")),
-        equipment=_csv(values.get("MEAL_ORGANIZER_EQUIPMENT")),
-        llm=LLMConfig(
-            provider=values.get("MEAL_ORGANIZER_LLM_PROVIDER", "ollama"),
-            model=values.get("MEAL_ORGANIZER_OLLAMA_MODEL", "qwen3:8b"),
-            ollama_host=values.get("MEAL_ORGANIZER_OLLAMA_HOST", "http://127.0.0.1:11434"),
-            openrouter_model=values.get("MEAL_ORGANIZER_OPENROUTER_MODEL", ""),
-            openrouter_api_key=values.get("MEAL_ORGANIZER_OPENROUTER_API_KEY", ""),
-        ),
-    )
+    try:
+        return UserConfig(
+            name=values.get("MEAL_ORGANIZER_NAME", ""),
+            servings=int(values.get("MEAL_ORGANIZER_SERVINGS", "1")),
+            weekly_budget=float(values.get("MEAL_ORGANIZER_WEEKLY_BUDGET", "50")),
+            allergies=_csv(values.get("MEAL_ORGANIZER_ALLERGIES")),
+            dislikes=_csv(values.get("MEAL_ORGANIZER_DISLIKES")),
+            equipment=_csv(values.get("MEAL_ORGANIZER_EQUIPMENT")),
+            llm=LLMConfig(
+                provider=values.get("MEAL_ORGANIZER_LLM_PROVIDER", "ollama"),
+                model=values.get("MEAL_ORGANIZER_OLLAMA_MODEL", "qwen3:8b"),
+                ollama_host=values.get("MEAL_ORGANIZER_OLLAMA_HOST", "http://127.0.0.1:11434"),
+                openrouter_model=values.get("MEAL_ORGANIZER_OPENROUTER_MODEL", ""),
+                openrouter_api_key=values.get("MEAL_ORGANIZER_OPENROUTER_API_KEY", ""),
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid configuration in {ENV_PATH}: {exc}") from exc
 
 
 def _quote_env(value: str) -> str:
@@ -81,11 +88,11 @@ def _quote_env(value: str) -> str:
 
 
 def save_config(config: UserConfig) -> None:
-    """Persist non-secret and secret settings in the user's ignored .env file."""
+    """Persist the complete configuration atomically in the user's ignored .env file."""
     ensure_app_dir()
     content = "\n".join(
         [
-            "# Meal Organizer configuration. This file contains your API key; never commit it.",
+            "# Meal Organizer configuration. Never commit this file.",
             f"MEAL_ORGANIZER_NAME={_quote_env(config.name)}",
             f"MEAL_ORGANIZER_SERVINGS={config.servings}",
             f"MEAL_ORGANIZER_WEEKLY_BUDGET={config.weekly_budget}",
@@ -100,11 +107,14 @@ def save_config(config: UserConfig) -> None:
             "",
         ]
     )
-    tmp_path = ENV_PATH.with_suffix(".tmp")
-    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path = ENV_PATH.with_name(f"{ENV_PATH.name}.tmp")
+    tmp_path.write_text(content, encoding="utf-8", newline="\n")
     if os.name != "nt":
         tmp_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
     tmp_path.replace(ENV_PATH)
+
+    if not ENV_PATH.exists():
+        raise RuntimeError(f"Could not create configuration file: {ENV_PATH}")
 
 
 def check_ollama(host: str) -> tuple[bool, list[str]]:
