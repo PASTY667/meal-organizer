@@ -6,7 +6,7 @@ A local-first Python CLI for planning affordable, balanced meals from what you a
 
 The repository currently contains the first working foundation: a Rich/Typer CLI, local SQLite inventory, interactive setup, LLM provider abstraction for Ollama and OpenRouter, and an external price-estimation adapter for Open Prices.
 
-The application is intentionally local-first. User configuration and inventory live under `~/.meal-organizer/`. API keys are never committed to the repository.
+The application is local-first. User settings live in `~/.meal-organizer/.env` and inventory lives in `~/.meal-organizer/`. The `.env` file is ignored by Git and should never be committed because it may contain an OpenRouter API key.
 
 ## Install
 
@@ -16,6 +16,8 @@ With Python 3.11+:
 python -m pip install -e .
 meal-organizer setup
 ```
+
+`setup` creates or updates `~/.meal-organizer/.env` and guides you through the LLM configuration. You can choose between a local Ollama model and OpenRouter. When Ollama is selected, the setup checks the local Ollama server and shows installed models when available. When OpenRouter is selected, it asks for the model and API key without echoing the key.
 
 For development:
 
@@ -37,6 +39,28 @@ meal-organizer price "eggs"
 meal-organizer plan
 meal-organizer cook "chicken curry"
 ```
+
+## Configuration
+
+The generated configuration uses environment variables in `~/.meal-organizer/.env`. A template is available at `.env.example`.
+
+For Ollama:
+
+```text
+MEAL_ORGANIZER_LLM_PROVIDER=ollama
+MEAL_ORGANIZER_OLLAMA_MODEL="qwen3:8b"
+MEAL_ORGANIZER_OLLAMA_HOST="http://127.0.0.1:11434"
+```
+
+For OpenRouter:
+
+```text
+MEAL_ORGANIZER_LLM_PROVIDER=openrouter
+MEAL_ORGANIZER_OPENROUTER_MODEL="your/provider-model"
+MEAL_ORGANIZER_OPENROUTER_API_KEY="your-secret-key"
+```
+
+Environment variables beginning with `MEAL_ORGANIZER_` override values from the `.env` file, which makes CI and deployment configuration possible without editing the file.
 
 ## LLM providers
 
