@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import re
+import math
 
 import httpx
 
@@ -21,8 +21,6 @@ class PriceEstimate:
     def cost_for(self, quantity: float, unit: str) -> float | None:
         requested = _normalise_quantity(quantity, unit)
         if requested is None:
-            if (self.price_per or "").upper() == "UNIT" and unit.lower() in {"unit", "piece", "pièce", "pcs"}:
-                return round(self.price * quantity, 2)
             return None
         base_value, base_unit = requested
         per = (self.price_per or "UNIT").upper()
@@ -41,6 +39,13 @@ class PriceEstimate:
         if self.package_quantity and self.package_unit == base_unit:
             return round(self.price * base_value / self.package_quantity, 2)
         return None
+
+    def purchase_cost(self, quantity: float, unit: str) -> float | None:
+        requested = _normalise_quantity(quantity, unit)
+        if requested and self.package_quantity and self.package_unit == requested[1]:
+            packages = math.ceil(requested[0] / self.package_quantity)
+            return round(packages * self.price, 2)
+        return self.cost_for(quantity, unit)
 
 
 def _normalise_quantity(quantity: float, unit: str) -> tuple[float, str] | None:
@@ -69,8 +74,6 @@ def _parse_package(product: dict) -> tuple[float | None, str | None]:
 
 
 class OpenPricesProvider:
-    """Read-only adapter for Open Prices observations."""
-
     BASE_URL = "https://prices.openfoodfacts.org/api/v1"
 
     def __init__(self, country_code: str = "FR"):
@@ -103,7 +106,6 @@ class OpenPricesProvider:
                 continue
             if value >= 0:
                 prices.append((value, item))
-
         if not prices:
             return None
 
@@ -136,3 +138,7 @@ class PriceService:
     def cost(self, product: str, quantity: float, unit: str) -> float | None:
         estimate = self.estimate(product)
         return estimate.cost_for(quantity, unit) if estimate else None
+
+    def purchase_cost(self, product: str, quantity: float, unit: str) -> float | None:
+        estimate = self.estimate(product)
+        return estimate.purchase_cost(quantity, unit) if estimate else None
