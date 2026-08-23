@@ -62,8 +62,7 @@ def _normalise(value: float, unit: str) -> tuple[float, str]:
 
 
 def _inventory_quantity(name: str, unit: str, inventory: list[InventoryItem]) -> float:
-    target = _normalise(0, unit)[1]
-    total = 0.0
+    target = _normalise(0, unit)[1]; total = 0.0
     for item in inventory:
         if item.name.casefold() != name.casefold(): continue
         item_value, item_unit = _normalise(item.quantity, item.unit)
@@ -81,7 +80,7 @@ def price_plan(plan: MealPlan, config: UserConfig, inventory: list[InventoryItem
             ingredient.estimated_cost = estimate.cost_for(required_value, required_unit) if estimate else None
             if ingredient.estimated_cost is not None: meal_cost += ingredient.estimated_cost
         meal.estimated_cost = round(meal_cost, 2) if meal_cost else None
-    shopping = build_shopping_list(plan, inventory)
+    shopping = build_shopping_list(plan, inventory, pricing)
     plan.shopping_cost = round(sum(item.estimated_cost or 0 for item in shopping), 2)
     plan.total_food_cost = round(sum(meal.estimated_cost or 0 for meal in plan.meals), 2)
     if plan.shopping_cost > config.weekly_budget + 0.01:
@@ -101,14 +100,14 @@ def generate_plan(provider: LLMProvider, config: UserConfig, inventory: list[Inv
     return price_plan(plan, config, inventory)
 
 
-def build_shopping_list(plan: MealPlan, inventory: list[InventoryItem]) -> list[MealIngredient]:
+def build_shopping_list(plan: MealPlan, inventory: list[InventoryItem], pricing: PriceService | None = None) -> list[MealIngredient]:
     grouped: dict[tuple[str, str], MealIngredient] = {}
     for meal in plan.meals:
         for ingredient in meal.ingredients:
             _, unit = _normalise(0, ingredient.unit); key = (ingredient.name.casefold(), unit)
             if key not in grouped: grouped[key] = MealIngredient(name=ingredient.name, quantity=0, unit=unit)
             grouped[key].quantity += _normalise(ingredient.quantity, ingredient.unit)[0]
-    result: list[MealIngredient] = []; pricing = PriceService()
+    result: list[MealIngredient] = []; pricing = pricing or PriceService()
     for item in grouped.values():
         missing = max(0, item.quantity - _inventory_quantity(item.name, item.unit, inventory))
         if missing > 0:
