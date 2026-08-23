@@ -11,6 +11,7 @@ class LLMRequest:
     system: str
     prompt: str
     temperature: float = 0.2
+    json_mode: bool = False
 
 
 class LLMProvider(Protocol):
@@ -22,17 +23,20 @@ class OllamaProvider:
         self.config = config
 
     def generate(self, request: LLMRequest) -> str:
+        payload = {
+            "model": self.config.model,
+            "stream": False,
+            "options": {"temperature": request.temperature},
+            "messages": [
+                {"role": "system", "content": request.system},
+                {"role": "user", "content": request.prompt},
+            ],
+        }
+        if request.json_mode:
+            payload["format"] = "json"
         response = httpx.post(
             f"{self.config.ollama_host.rstrip('/')}/api/chat",
-            json={
-                "model": self.config.model,
-                "stream": False,
-                "options": {"temperature": request.temperature},
-                "messages": [
-                    {"role": "system", "content": request.system},
-                    {"role": "user", "content": request.prompt},
-                ],
-            },
+            json=payload,
             timeout=120,
         )
         response.raise_for_status()
@@ -46,17 +50,20 @@ class OpenRouterProvider:
     def generate(self, request: LLMRequest) -> str:
         if not self.config.openrouter_api_key or not self.config.openrouter_model:
             raise RuntimeError("OpenRouter requires an API key and model")
+        payload = {
+            "model": self.config.openrouter_model,
+            "temperature": request.temperature,
+            "messages": [
+                {"role": "system", "content": request.system},
+                {"role": "user", "content": request.prompt},
+            ],
+        }
+        if request.json_mode:
+            payload["response_format"] = {"type": "json_object"}
         response = httpx.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {self.config.openrouter_api_key}"},
-            json={
-                "model": self.config.openrouter_model,
-                "temperature": request.temperature,
-                "messages": [
-                    {"role": "system", "content": request.system},
-                    {"role": "user", "content": request.prompt},
-                ],
-            },
+            json=payload,
             timeout=120,
         )
         response.raise_for_status()
