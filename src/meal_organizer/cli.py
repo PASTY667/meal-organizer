@@ -1,3 +1,4 @@
+from getpass import getpass
 from typing import Optional
 
 import typer
@@ -5,7 +6,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from .config import LLMConfig, UserConfig, check_ollama, load_config, save_config
+from .config import ENV_PATH, LLMConfig, UserConfig, check_ollama, load_config, save_config
 from .db import Database
 from .llm import LLMRequest, create_provider
 from .planning import generate_plan
@@ -28,18 +29,16 @@ def warn(message: str) -> None:
 
 
 def choose_llm(current: LLMConfig) -> LLMConfig:
-    console.print(Panel.fit(
-        "[bold]LLM CONFIGURATION[/bold]\nChoose how Meal Organizer should generate plans.",
-        border_style="cyan",
-    ))
-    provider = typer.prompt(
-        "Provider",
-        default=current.provider,
-        show_default=True,
-    ).strip().lower()
+    console.print(
+        Panel.fit(
+            "[bold]LLM CONFIGURATION[/bold]\nChoose how Meal Organizer should generate plans.",
+            border_style="cyan",
+        )
+    )
+    provider = typer.prompt("Provider", default=current.provider).strip().lower()
     while provider not in {"ollama", "openrouter"}:
         warn("Choose 'ollama' for a local model or 'openrouter' for a hosted model.")
-        provider = typer.prompt("Provider", default="ollama").strip().lower()
+        provider = typer.prompt("Provider", default=current.provider).strip().lower()
 
     if provider == "ollama":
         host = typer.prompt("Ollama URL", default=current.ollama_host)
@@ -67,11 +66,15 @@ def choose_llm(current: LLMConfig) -> LLMConfig:
         "OpenRouter model",
         default=current.openrouter_model or "openai/gpt-4o-mini",
     )
-    api_key = typer.prompt("OpenRouter API key", default="", hide_input=True)
+    if current.openrouter_api_key:
+        console.print("[dim]An OpenRouter API key is already configured. Press Enter to keep it.[/dim]")
+    api_key = getpass("OpenRouter API key (paste is supported): ")
     if not api_key:
         api_key = current.openrouter_api_key
     if not api_key:
         warn("No API key was provided. OpenRouter will remain unavailable until configured.")
+    else:
+        ok("OpenRouter API key loaded.")
     return LLMConfig(
         provider="openrouter",
         model=current.model,
@@ -85,7 +88,8 @@ def choose_llm(current: LLMConfig) -> LLMConfig:
 def setup() -> None:
     """Create or update the local .env configuration."""
     current = load_config()
-    console.print(Panel.fit("[bold]MEAL ORGANIZER[/bold]\nInitial setup", border_style="cyan"))
+    env_status = "existing configuration loaded" if ENV_PATH.exists() else "new configuration"
+    console.print(Panel.fit(f"[bold]MEAL ORGANIZER[/bold]\nSetup · {env_status}", border_style="cyan"))
     name = typer.prompt("Name", default=current.name)
     budget = typer.prompt("Weekly budget (€)", default=current.weekly_budget, type=float)
     servings = typer.prompt("Servings", default=current.servings, type=int)
@@ -105,7 +109,7 @@ def setup() -> None:
     )
     save_config(config)
     Database()
-    ok("Configuration saved to ~/.meal-organizer/.env")
+    ok(f"Configuration saved to {ENV_PATH}")
     console.print("[dim]Run 'meal-organizer doctor' to verify the setup.[/dim]")
 
 
@@ -119,7 +123,7 @@ def doctor() -> None:
     table.add_column("Details")
     table.add_row("Python", "[green]OK[/green]", "Supported runtime")
     table.add_row("SQLite", "[green]OK[/green]", "Local database available")
-    table.add_row("Config", "[green]OK[/green]", f"{config.llm.provider} / ~/.meal-organizer/.env")
+    table.add_row("Config", "[green]OK[/green]", f"{config.llm.provider} / {ENV_PATH}")
     try:
         provider = create_provider(config.llm)
         provider.generate(LLMRequest(system="Reply with OK only.", prompt="OK"))
