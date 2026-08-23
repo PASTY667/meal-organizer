@@ -14,9 +14,8 @@ dependencies = [
   "typer>=0.16,<1",
   "rich>=14,<15",
   "pydantic>=2.11,<3",
-  "pydantic-settings>=2.10,<3",
   "httpx>=0.28,<1",
-  "keyring>=25,<26",
+  "python-dotenv>=1.1,<2",
 ]
 
 [project.optional-dependencies]
