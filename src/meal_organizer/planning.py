@@ -48,8 +48,7 @@ def _inventory_payload(inventory: list[InventoryItem]) -> list[dict]:
 
 def _parse_json(response: str):
     cleaned = response.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    if cleaned.startswith("```"): cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     return cleaned
 
 
@@ -108,8 +107,8 @@ def build_shopping_list(plan: MealPlan, inventory: list[InventoryItem], pricing:
     return result
 
 
-def price_plan(plan: MealPlan, config: UserConfig, inventory: list[InventoryItem], enforce_budget: bool = True) -> MealPlan:
-    pricing = PriceService()
+def price_plan(plan: MealPlan, config: UserConfig, inventory: list[InventoryItem], enforce_budget: bool = True, pricing: PriceService | None = None) -> MealPlan:
+    pricing = pricing or PriceService()
     for meal in plan.meals:
         meal_cost = 0.0
         for ingredient in meal.ingredients:
