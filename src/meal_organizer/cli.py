@@ -5,7 +5,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from .config import LLMConfig, UserConfig, load_config, save_config
+from .config import LLMConfig, UserConfig, check_ollama, load_config, save_config
 from .db import Database
 from .llm import LLMRequest, create_provider
 from .planning import generate_plan
@@ -23,24 +23,76 @@ def fail(message: str) -> None:
     console.print(f"[bold red]✗[/bold red] {message}")
 
 
+def warn(message: str) -> None:
+    console.print(f"[bold yellow]![/bold yellow] {message}")
+
+
+def choose_llm(current: LLMConfig) -> LLMConfig:
+    console.print(Panel.fit(
+        "[bold]LLM CONFIGURATION[/bold]\nChoose how Meal Organizer should generate plans.",
+        border_style="cyan",
+    ))
+    provider = typer.prompt(
+        "Provider",
+        default=current.provider,
+        show_default=True,
+    ).strip().lower()
+    while provider not in {"ollama", "openrouter"}:
+        warn("Choose 'ollama' for a local model or 'openrouter' for a hosted model.")
+        provider = typer.prompt("Provider", default="ollama").strip().lower()
+
+    if provider == "ollama":
+        host = typer.prompt("Ollama URL", default=current.ollama_host)
+        reachable, models = check_ollama(host)
+        if reachable:
+            ok("Ollama is reachable.")
+            if models:
+                table = Table(title="Local Ollama models")
+                table.add_column("Model")
+                for model in models:
+                    table.add_row(model)
+                console.print(table)
+                default_model = current.model if current.model in models else models[0]
+            else:
+                warn("Ollama is running but no models are installed.")
+                console.print("Install one with: [bold]ollama pull qwen3:8b[/bold]")
+                default_model = current.model
+        else:
+            warn("Ollama is not reachable. Start Ollama before generating a plan.")
+            default_model = current.model
+        model = typer.prompt("Ollama model", default=default_model)
+        return LLMConfig(provider="ollama", model=model, ollama_host=host)
+
+    model = typer.prompt(
+        "OpenRouter model",
+        default=current.openrouter_model or "openai/gpt-4o-mini",
+    )
+    api_key = typer.prompt("OpenRouter API key", default="", hide_input=True)
+    if not api_key:
+        api_key = current.openrouter_api_key
+    if not api_key:
+        warn("No API key was provided. OpenRouter will remain unavailable until configured.")
+    return LLMConfig(
+        provider="openrouter",
+        model=current.model,
+        ollama_host=current.ollama_host,
+        openrouter_model=model,
+        openrouter_api_key=api_key,
+    )
+
+
 @app.command()
 def setup() -> None:
-    """Create or update the local user configuration."""
+    """Create or update the local .env configuration."""
     current = load_config()
-    console.print(Panel.fit("[bold]MEAL ORGANIZER[/bold]\nConfiguration", border_style="cyan"))
+    console.print(Panel.fit("[bold]MEAL ORGANIZER[/bold]\nInitial setup", border_style="cyan"))
     name = typer.prompt("Name", default=current.name)
     budget = typer.prompt("Weekly budget (€)", default=current.weekly_budget, type=float)
     servings = typer.prompt("Servings", default=current.servings, type=int)
     allergies = typer.prompt("Allergies (comma separated)", default=", ".join(current.allergies))
     dislikes = typer.prompt("Foods to avoid (comma separated)", default=", ".join(current.dislikes))
     equipment = typer.prompt("Equipment (comma separated)", default=", ".join(current.equipment))
-    provider = typer.prompt("LLM provider (ollama/openrouter)", default=current.llm.provider)
-    model = typer.prompt("Ollama model", default=current.llm.model)
-    ollama_host = typer.prompt("Ollama host", default=current.llm.ollama_host)
-    openrouter_model = typer.prompt("OpenRouter model", default=current.llm.openrouter_model)
-    api_key = typer.prompt("OpenRouter API key (leave empty to keep current)", default="", hide_input=True)
-    if not api_key:
-        api_key = current.llm.openrouter_api_key
+    llm = choose_llm(current.llm)
 
     config = UserConfig(
         name=name,
@@ -49,17 +101,12 @@ def setup() -> None:
         allergies=[x.strip() for x in allergies.split(",") if x.strip()],
         dislikes=[x.strip() for x in dislikes.split(",") if x.strip()],
         equipment=[x.strip() for x in equipment.split(",") if x.strip()],
-        llm=LLMConfig(
-            provider=provider.strip().lower(),
-            model=model,
-            ollama_host=ollama_host,
-            openrouter_model=openrouter_model,
-            openrouter_api_key=api_key,
-        ),
+        llm=llm,
     )
     save_config(config)
     Database()
-    ok("Configuration saved. Secrets are stored in the OS keyring, not the config file.")
+    ok("Configuration saved to ~/.meal-organizer/.env")
+    console.print("[dim]Run 'meal-organizer doctor' to verify the setup.[/dim]")
 
 
 @app.command()
@@ -72,7 +119,7 @@ def doctor() -> None:
     table.add_column("Details")
     table.add_row("Python", "[green]OK[/green]", "Supported runtime")
     table.add_row("SQLite", "[green]OK[/green]", "Local database available")
-    table.add_row("Config", "[green]OK[/green]", config.llm.provider)
+    table.add_row("Config", "[green]OK[/green]", f"{config.llm.provider} / ~/.meal-organizer/.env")
     try:
         provider = create_provider(config.llm)
         provider.generate(LLMRequest(system="Reply with OK only.", prompt="OK"))
@@ -164,7 +211,12 @@ def plan() -> None:
     for meal in meal_plan.meals:
         table.add_row(meal.day, meal.meal, meal.recipe, f"{meal.estimated_cost:.2f} €")
     console.print(table)
-    console.print(Panel(f"Estimated total: [bold]{meal_plan.total_estimated_cost:.2f} €[/bold]", border_style="green"))
+    console.print(
+        Panel(
+            f"Estimated total: [bold]{meal_plan.total_estimated_cost:.2f} €[/bold]",
+            border_style="green",
+        )
+    )
 
 
 @app.command()
