@@ -101,20 +101,34 @@ def generate_plan(provider: LLMProvider, config: UserConfig, inventory: list[Inv
 
 
 def build_shopping_list(plan: MealPlan, inventory: list[InventoryItem], pricing: PriceService | None = None) -> list[MealIngredient]:
-    grouped: dict[tuple[str, str], MealIngredient] = {}
+    # Aggregate raw quantities first. MealIngredient requires quantity > 0, so a
+    # temporary zero-valued domain object must not be constructed during grouping.
+    grouped: dict[tuple[str, str], dict[str, float | str]] = {}
     for meal in plan.meals:
         for ingredient in meal.ingredients:
-            _, unit = _normalise(0, ingredient.unit); key = (ingredient.name.casefold(), unit)
-            if key not in grouped: grouped[key] = MealIngredient(name=ingredient.name, quantity=0, unit=unit)
-            grouped[key].quantity += _normalise(ingredient.quantity, ingredient.unit)[0]
-    result: list[MealIngredient] = []; pricing = pricing or PriceService()
+            quantity, unit = _normalise(ingredient.quantity, ingredient.unit)
+            key = (ingredient.name.casefold(), unit)
+            if key not in grouped:
+                grouped[key] = {"name": ingredient.name, "quantity": 0.0, "unit": unit}
+            grouped[key]["quantity"] = float(grouped[key]["quantity"]) + quantity
+
+    result: list[MealIngredient] = []
+    pricing = pricing or PriceService()
     for item in grouped.values():
-        missing = max(0, item.quantity - _inventory_quantity(item.name, item.unit, inventory))
+        name = str(item["name"])
+        unit = str(item["unit"])
+        required = float(item["quantity"])
+        missing = max(0.0, required - _inventory_quantity(name, unit, inventory))
         if missing > 0:
-            item.quantity = round(missing, 2)
-            estimate = pricing.estimate(item.name)
-            item.estimated_cost = estimate.purchase_cost(missing, item.unit) if estimate else None
-            result.append(item)
+            estimate = pricing.estimate(name)
+            result.append(
+                MealIngredient(
+                    name=name,
+                    quantity=round(missing, 2),
+                    unit=unit,
+                    estimated_cost=estimate.purchase_cost(missing, unit) if estimate else None,
+                )
+            )
     return result
 
 
