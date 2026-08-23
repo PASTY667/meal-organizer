@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import re
 
 import httpx
 
@@ -13,10 +14,62 @@ class PriceEstimate:
     confidence: str
     observed_at: str | None = None
     samples: int = 0
+    price_per: str | None = None
+    package_quantity: float | None = None
+    package_unit: str | None = None
+
+    def cost_for(self, quantity: float, unit: str) -> float | None:
+        requested = _normalise_quantity(quantity, unit)
+        if requested is None:
+            if (self.price_per or "").upper() == "UNIT" and unit.lower() in {"unit", "piece", "pièce", "pcs"}:
+                return round(self.price * quantity, 2)
+            return None
+        base_value, base_unit = requested
+        per = (self.price_per or "UNIT").upper()
+        if per in {"KG", "KILOGRAM"} and base_unit == "g":
+            return round(self.price * base_value / 1000, 2)
+        if per in {"G", "GRAM"} and base_unit == "g":
+            return round(self.price * base_value, 2)
+        if per in {"100G", "100_G"} and base_unit == "g":
+            return round(self.price * base_value / 100, 2)
+        if per in {"L", "LITER", "LITRE"} and base_unit == "ml":
+            return round(self.price * base_value / 1000, 2)
+        if per in {"100ML", "100_ML"} and base_unit == "ml":
+            return round(self.price * base_value / 100, 2)
+        if per == "UNIT" and base_unit == "unit":
+            return round(self.price * base_value, 2)
+        if self.package_quantity and self.package_unit == base_unit:
+            return round(self.price * base_value / self.package_quantity, 2)
+        return None
+
+
+def _normalise_quantity(quantity: float, unit: str) -> tuple[float, str] | None:
+    unit = unit.strip().lower()
+    if unit in {"g", "gram", "grams", "gramme", "grammes"}:
+        return quantity, "g"
+    if unit in {"kg", "kilogram", "kilograms"}:
+        return quantity * 1000, "g"
+    if unit in {"ml", "millilitre", "millilitres", "milliliter", "milliliters"}:
+        return quantity, "ml"
+    if unit in {"l", "litre", "litres", "liter", "liters"}:
+        return quantity * 1000, "ml"
+    if unit in {"unit", "units", "piece", "pieces", "pcs", "pièce", "pièces"}:
+        return quantity, "unit"
+    return None
+
+
+def _parse_package(product: dict) -> tuple[float | None, str | None]:
+    nested = product.get("product") or {}
+    value = nested.get("product_quantity")
+    unit = nested.get("product_quantity_unit")
+    try:
+        return (float(value), str(unit).lower()) if value and unit else (None, None)
+    except (TypeError, ValueError):
+        return None, None
 
 
 class OpenPricesProvider:
-    """Read-only adapter for the Open Prices REST API."""
+    """Read-only adapter for Open Prices observations."""
 
     BASE_URL = "https://prices.openfoodfacts.org/api/v1"
 
@@ -42,8 +95,7 @@ class OpenPricesProvider:
             item_country = (location.get("osm_address_country_code") or "").upper()
             if item_country and item_country != self.country_code:
                 continue
-            currency = item.get("currency")
-            if currency and currency != "EUR":
+            if (item.get("currency") or "EUR") != "EUR":
                 continue
             try:
                 value = float(item.get("price"))
@@ -55,10 +107,10 @@ class OpenPricesProvider:
         if not prices:
             return None
 
-        prices.sort(key=lambda x: x[0])
-        values = [value for value, _ in prices]
+        values = sorted(value for value, _ in prices)
         median = values[len(values) // 2]
         latest = max(prices, key=lambda x: x[1].get("date", ""))[1]
+        package_quantity, package_unit = _parse_package(latest)
         confidence = "high" if len(values) >= 8 else "medium" if len(values) >= 3 else "low"
         return PriceEstimate(
             product=product,
@@ -68,6 +120,9 @@ class OpenPricesProvider:
             confidence=confidence,
             observed_at=latest.get("date") or datetime.now(timezone.utc).date().isoformat(),
             samples=len(values),
+            price_per=latest.get("price_per"),
+            package_quantity=package_quantity,
+            package_unit=package_unit,
         )
 
 
@@ -77,3 +132,7 @@ class PriceService:
 
     def estimate(self, product: str) -> PriceEstimate | None:
         return self.open_prices.estimate(product)
+
+    def cost(self, product: str, quantity: float, unit: str) -> float | None:
+        estimate = self.estimate(product)
+        return estimate.cost_for(quantity, unit) if estimate else None
