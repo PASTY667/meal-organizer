@@ -21,6 +21,7 @@ Les coûts doivent rester à zéro dans ta réponse : l'application les calcule 
 Retourne uniquement le JSON correspondant au schéma fourni.""",
         "recipe": "Génère une recette détaillée en français à partir du repas planifié, du stock et de la liste de courses. Respecte strictement allergies, aliments refusés et équipement. Donne des étapes numérotées simples, adaptées à un étudiant. Si une recherche web est disponible, privilégie des recettes réelles et crédibles et indique les sources utilisées.",
         "question": "Réponds en français à la question de l'utilisateur sur ce repas. Ne modifie pas le plan tant que l'utilisateur ne le demande pas explicitement.",
+        "recipe_question": "Réponds en français à la question de l'utilisateur sur cette recette. Sois pratique et précis, en respectant les ingrédients, l'équipement et les contraintes alimentaires du plan.",
         "replace": "Remplace uniquement le repas demandé. Respecte strictement les contraintes, le budget et le stock. Retourne uniquement un objet PlannedMeal JSON correspondant au schéma fourni.",
     },
     "en": {
@@ -36,6 +37,7 @@ Keep costs at zero in your response: the application calculates them from extern
 Return JSON only matching the supplied schema.""",
         "recipe": "Generate a detailed recipe in English from the planned meal, inventory and shopping list. Strictly respect allergies, disliked foods and equipment. Give simple numbered steps suitable for a student. If web research is available, prefer real, credible recipes and include the sources used.",
         "question": "Answer the user's question about this meal in English. Do not change the plan unless the user explicitly asks you to.",
+        "recipe_question": "Answer the user's question about this recipe in English. Be practical and precise while respecting the ingredients, equipment and dietary constraints of the plan.",
         "replace": "Replace only the requested meal. Strictly respect constraints, budget and inventory. Return only a PlannedMeal JSON object matching the supplied schema.",
     },
 }
@@ -46,11 +48,7 @@ def _inventory_payload(inventory: list[InventoryItem]) -> list[dict]:
 
 
 def build_plan_request(config: UserConfig, inventory: list[InventoryItem]) -> LLMRequest:
-    payload = {
-        "servings": config.servings, "weekly_budget_eur": config.weekly_budget, "language": config.language,
-        "allergies": config.allergies, "dislikes": config.dislikes, "equipment": config.equipment,
-        "inventory": _inventory_payload(inventory), "required_output_schema": MealPlan.model_json_schema(),
-    }
+    payload = {"servings": config.servings, "weekly_budget_eur": config.weekly_budget, "language": config.language, "allergies": config.allergies, "dislikes": config.dislikes, "equipment": config.equipment, "inventory": _inventory_payload(inventory), "required_output_schema": MealPlan.model_json_schema()}
     return LLMRequest(system=TEXT[config.language]["system"], prompt=json.dumps(payload, ensure_ascii=False, indent=2), json_mode=True)
 
 
@@ -132,6 +130,10 @@ def generate_recipe(provider: LLMProvider, config: UserConfig, meal: PlannedMeal
 
 def build_question_request(config: UserConfig, meal: PlannedMeal, question: str) -> LLMRequest:
     return LLMRequest(system=TEXT[config.language]["question"], prompt=json.dumps({"meal": meal.model_dump(), "question": question}, ensure_ascii=False), web_search=config.llm.web_search)
+
+
+def build_recipe_question_request(config: UserConfig, recipe: Recipe, question: str) -> LLMRequest:
+    return LLMRequest(system=TEXT[config.language]["recipe_question"], prompt=json.dumps({"recipe": recipe.model_dump(), "question": question}, ensure_ascii=False), web_search=config.llm.web_search)
 
 
 def replace_meal(provider: LLMProvider, config: UserConfig, meal: PlannedMeal, inventory: list[InventoryItem], reason: str) -> PlannedMeal:
