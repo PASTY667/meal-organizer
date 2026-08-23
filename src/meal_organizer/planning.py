@@ -15,7 +15,7 @@ Les allergies sont des contraintes absolues. Les aliments refusés ne doivent ja
 N'utilise que l'équipement fourni. Utilise le stock quand c'est pertinent, mais propose aussi des achats.
 Construis progressivement une semaine de 7 jours avec déjeuner et dîner.
 Pour chaque créneau demandé, propose exactement 2 plats différents et réalistes.
-Les quantités sont pour le nombre de personnes indiqué. Pour un adulte, vise des portions normales et rassasiantes : environ 80-120 g de féculents secs, 120-180 g de viande/poisson, 2-3 œufs et une portion généreuse de légumes selon le plat.
+Quantités sont pour le nombre de personnes indiqué. Pour un adulte, vise des portions normales et rassasiantes : environ 80-120 g de féculents secs, 120-180 g de viande/poisson, 2-3 œufs et une portion généreuse de légumes selon le plat.
 Évite les portions manifestement trop petites. Réutilise intelligemment les ingrédients sans faire manger exactement le même plat plusieurs fois.
 Ne rédige pas les recettes complètes. Donne nom, description et ingrédients avec quantités.
 Les coûts sont calculés par l'application à partir des prix externes. Retourne uniquement le JSON demandé.""",
@@ -48,8 +48,22 @@ def _inventory_payload(inventory: list[InventoryItem]) -> list[dict]:
 
 def _parse_json(response: str):
     cleaned = response.strip()
-    if cleaned.startswith("```"): cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     return cleaned
+
+
+def _parse_meal_options(response: str) -> list[dict]:
+    """Accept the expected JSON array and the common LLM wrapper form."""
+    payload = json.loads(_parse_json(response))
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("planned_meals", "meals", "options"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+    raise ValueError("The model returned an invalid meal-options JSON structure")
 
 
 def build_plan_request(config: UserConfig, inventory: list[InventoryItem]) -> LLMRequest:
@@ -59,16 +73,19 @@ def build_plan_request(config: UserConfig, inventory: list[InventoryItem]) -> LL
 
 def build_day_options_request(config: UserConfig, inventory: list[InventoryItem], existing: list[PlannedMeal], day: str) -> LLMRequest:
     schema = TypeAdapter(list[PlannedMeal]).json_schema()
-    payload = {"day": day, "servings": config.servings, "weekly_budget_eur": config.weekly_budget, "allergies": config.allergies, "dislikes": config.dislikes, "equipment": config.equipment, "inventory": _inventory_payload(inventory), "already_selected_meals": [meal.model_dump() for meal in existing], "required_output_schema": schema, "rules": {"options": 4, "two_lunches": 2, "two_dinners": 2, "normal_portions": True}}
+    payload = {"day": day, "servings": config.servings, "weekly_budget_eur": config.weekly_budget, "allergies": config.allergies, "dislikes": config.dislikes, "equipment": config.equipment, "inventory": _inventory_payload(inventory), "already_selected_meals": [meal.model_dump() for meal in existing], "required_output_schema": schema, "rules": {"options": 4, "two_lunches": 2, "two_dinners": 2, "normal_portions": True, "output_must_be_json_array": True}}
     return LLMRequest(system=TEXT[config.language]["system"], prompt=json.dumps(payload, ensure_ascii=False, indent=2), json_mode=True, web_search=config.llm.web_search)
 
 
 def generate_day_options(provider: LLMProvider, config: UserConfig, inventory: list[InventoryItem], existing: list[PlannedMeal], day: str) -> list[PlannedMeal]:
-    options = TypeAdapter(list[PlannedMeal]).validate_json(_parse_json(provider.generate(build_day_options_request(config, inventory, existing, day))))
-    if len(options) != 4: raise ValueError(f"Expected 4 options for {day}, received {len(options)}")
+    raw = provider.generate(build_day_options_request(config, inventory, existing, day))
+    options = TypeAdapter(list[PlannedMeal]).validate_python(_parse_meal_options(raw))
+    if len(options) != 4:
+        raise ValueError(f"Expected 4 options for {day}, received {len(options)}")
     lunches = [m for m in options if m.meal.casefold() in {"déjeuner", "dejeuner", "lunch"}]
     dinners = [m for m in options if m.meal.casefold() in {"dîner", "diner", "dinner"}]
-    if len(lunches) != 2 or len(dinners) != 2: raise ValueError(f"The model did not return 2 lunch and 2 dinner options for {day}")
+    if len(lunches) != 2 or len(dinners) != 2:
+        raise ValueError(f"The model did not return 2 lunch and 2 dinner options for {day}")
     return options
 
 
