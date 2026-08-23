@@ -7,7 +7,8 @@ from rich.table import Table
 
 from .config import LLMConfig, UserConfig, load_config, save_config
 from .db import Database
-from .llm import create_provider, LLMRequest
+from .llm import LLMRequest, create_provider
+from .planning import generate_plan
 from .pricing import PriceService
 
 app = typer.Typer(help="Plan simple, balanced and affordable meals.", no_args_is_help=True)
@@ -58,7 +59,7 @@ def setup() -> None:
     )
     save_config(config)
     Database()
-    ok("Configuration saved locally.")
+    ok("Configuration saved. Secrets are stored in the OS keyring, not the config file.")
 
 
 @app.command()
@@ -120,7 +121,7 @@ def inventory_remove(name: str) -> None:
 
 @app.command()
 def price(product: str) -> None:
-    """Estimate a product price from external data."""
+    """Estimate a product price from Open Prices."""
     estimate = PriceService().estimate(product)
     if not estimate:
         fail("No reliable external price was found.")
@@ -130,40 +131,40 @@ def price(product: str) -> None:
     table.add_column("Source")
     table.add_column("Confidence")
     table.add_column("Samples")
-    table.add_row(f"{estimate.price:.2f} {estimate.currency}", estimate.source, estimate.confidence, str(estimate.samples))
+    table.add_row(
+        f"{estimate.price:.2f} {estimate.currency}",
+        estimate.source,
+        estimate.confidence,
+        str(estimate.samples),
+    )
     console.print(table)
 
 
 @app.command()
 def plan() -> None:
-    """Generate a weekly plan using the configured LLM."""
+    """Generate and validate a weekly meal plan."""
     config = load_config()
     inventory = Database().list_inventory()
     if not inventory:
         fail("Inventory is empty. Add ingredients first with 'meal-organizer inventory add'.")
         raise typer.Exit(1)
     provider = create_provider(config.llm)
-    inventory_text = ", ".join(f"{x.quantity:g} {x.unit} {x.name}" for x in inventory)
-    system = (
-        "You are a meal planning assistant. Respect allergies as hard constraints. "
-        "Never recommend an explicitly disliked food. Consider equipment and budget. "
-        "Return concise Markdown with a 7-day table and a shopping list. Clearly label "
-        "estimated costs and never claim a price is exact."
-    )
-    prompt = (
-        f"Servings: {config.servings}\nBudget: {config.weekly_budget:.2f} EUR/week\n"
-        f"Allergies: {', '.join(config.allergies) or 'none'}\n"
-        f"Foods to avoid: {', '.join(config.dislikes) or 'none'}\n"
-        f"Equipment: {', '.join(config.equipment) or 'basic stovetop'}\n"
-        f"Inventory: {inventory_text}"
-    )
-    with console.status("Generating meal plan..."):
+    with console.status("Generating and validating meal plan..."):
         try:
-            result = provider.generate(LLMRequest(system=system, prompt=prompt))
+            meal_plan = generate_plan(provider, config, inventory)
         except Exception as exc:
-            fail(f"LLM request failed: {exc}")
+            fail(f"Meal plan rejected: {exc}")
             raise typer.Exit(1) from exc
-    console.print(Panel(result, title="Weekly meal plan", border_style="green"))
+
+    table = Table(title="Weekly meal plan")
+    table.add_column("Day")
+    table.add_column("Meal")
+    table.add_column("Recipe")
+    table.add_column("Est. cost", justify="right")
+    for meal in meal_plan.meals:
+        table.add_row(meal.day, meal.meal, meal.recipe, f"{meal.estimated_cost:.2f} €")
+    console.print(table)
+    console.print(Panel(f"Estimated total: [bold]{meal_plan.total_estimated_cost:.2f} €[/bold]", border_style="green"))
 
 
 @app.command()
@@ -174,7 +175,7 @@ def cook(recipe: Optional[str] = typer.Argument(None)) -> None:
     console.print(Panel.fit(f"[bold]COOKING MODE[/bold]\n{recipe}", border_style="yellow"))
     console.print("Enter each step as you cook. Use Ctrl+C to exit.")
     typer.prompt("When ready, press Enter", default="", show_default=False)
-    console.print("[green]Ready. The recipe step-by-step UI will be connected to generated recipes in the next milestone.[/green]")
+    console.print("[green]Cooking mode is ready for generated recipe steps in the next milestone.[/green]")
 
 
 if __name__ == "__main__":
