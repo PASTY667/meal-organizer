@@ -1,44 +1,43 @@
 import json
 
+from pydantic import TypeAdapter
+
 from .config import UserConfig
 from .db import InventoryItem
 from .llm import LLMProvider, LLMRequest
 from .models import MealIngredient, MealPlan, PlannedMeal, Recipe
 from .pricing import PriceService
 
-
 TEXT = {
     "fr": {
         "system": """Tu es le moteur de planification de Meal Organizer. Réponds en français.
-Les allergies sont des contraintes absolues : ne propose jamais un allergène fourni par l'utilisateur.
-Les aliments explicitement refusés ne doivent jamais apparaître.
-N'utilise que l'équipement fourni.
-Utilise le stock existant lorsqu'il est pertinent, mais construis aussi une liste de courses réaliste pour compléter la semaine.
-Le budget est une contrainte forte. Préfère les ingrédients polyvalents et limite le gaspillage.
-Planifie exactement deux repas par jour : déjeuner et dîner, soit 14 repas.
-Ne rédige pas les recettes complètes : donne seulement le nom, une description courte et les ingrédients/quantités nécessaires.
-Les coûts doivent rester à zéro dans ta réponse : l'application les calcule à partir de sources de prix externes.
-Retourne uniquement le JSON correspondant au schéma fourni.""",
-        "recipe": "Génère une recette détaillée en français à partir du repas planifié, du stock et de la liste de courses. Respecte strictement allergies, aliments refusés et équipement. Donne des étapes numérotées simples, adaptées à un étudiant. Si une recherche web est disponible, privilégie des recettes réelles et crédibles et indique les sources utilisées.",
-        "question": "Réponds en français à la question de l'utilisateur sur ce repas. Ne modifie pas le plan tant que l'utilisateur ne le demande pas explicitement.",
-        "recipe_question": "Réponds en français à la question de l'utilisateur sur cette recette. Sois pratique et précis, en respectant les ingrédients, l'équipement et les contraintes alimentaires du plan.",
-        "replace": "Remplace uniquement le repas demandé. Respecte strictement les contraintes, le budget et le stock. Retourne uniquement un objet PlannedMeal JSON correspondant au schéma fourni.",
+Les allergies sont des contraintes absolues. Les aliments refusés ne doivent jamais apparaître.
+N'utilise que l'équipement fourni. Utilise le stock quand c'est pertinent, mais propose aussi des achats.
+Construis progressivement une semaine de 7 jours avec déjeuner et dîner.
+Pour chaque créneau demandé, propose exactement 2 plats différents et réalistes.
+Les quantités sont pour le nombre de personnes indiqué. Pour un adulte, vise des portions normales et rassasiantes : environ 80-120 g de féculents secs, 120-180 g de viande/poisson, 2-3 œufs et une portion généreuse de légumes selon le plat.
+Évite les portions manifestement trop petites. Réutilise intelligemment les ingrédients sans faire manger exactement le même plat plusieurs fois.
+Ne rédige pas les recettes complètes. Donne nom, description et ingrédients avec quantités.
+Les coûts sont calculés par l'application à partir des prix externes. Retourne uniquement le JSON demandé.""",
+        "recipe": "Génère une recette détaillée en français à partir du repas planifié, du stock et de la liste de courses. Respecte strictement allergies, aliments refusés et équipement. Donne des étapes numérotées simples, adaptées à un étudiant. Si la recherche web est disponible, privilégie des recettes réelles et crédibles et indique les sources utilisées.",
+        "question": "Réponds en français à la question de l'utilisateur sur ce repas sans modifier le plan.",
+        "recipe_question": "Réponds en français à la question de l'utilisateur sur cette recette. Sois pratique et précis.",
+        "replace": "Remplace uniquement le repas demandé. Respecte strictement les contraintes, les portions normales, le budget et le stock. Retourne uniquement un PlannedMeal JSON.",
     },
     "en": {
         "system": """You are the Meal Organizer planning engine. Respond in English.
-Allergies are hard constraints: never include a user-provided allergen.
-Explicitly disliked foods must never appear.
-Only use the equipment provided.
-Use existing inventory when useful, but also build a realistic shopping list to complete the week.
-Budget is a hard constraint. Prefer versatile ingredients and minimize waste.
-Plan exactly two meals per day: lunch and dinner, 14 meals total.
-Do not write full recipes: only provide the meal name, a short description, and required ingredients/quantities.
-Keep costs at zero in your response: the application calculates them from external price data.
-Return JSON only matching the supplied schema.""",
-        "recipe": "Generate a detailed recipe in English from the planned meal, inventory and shopping list. Strictly respect allergies, disliked foods and equipment. Give simple numbered steps suitable for a student. If web research is available, prefer real, credible recipes and include the sources used.",
-        "question": "Answer the user's question about this meal in English. Do not change the plan unless the user explicitly asks you to.",
-        "recipe_question": "Answer the user's question about this recipe in English. Be practical and precise while respecting the ingredients, equipment and dietary constraints of the plan.",
-        "replace": "Replace only the requested meal. Strictly respect constraints, budget and inventory. Return only a PlannedMeal JSON object matching the supplied schema.",
+Allergies are hard constraints. Disliked foods must never appear.
+Only use the provided equipment. Use inventory when useful, but also propose purchases.
+Build a 7-day week progressively with lunch and dinner.
+For each requested slot, propose exactly 2 different, realistic dishes.
+Quantities are for the requested number of servings. For an adult, use normal satisfying portions: roughly 80-120 g dry starch, 120-180 g meat/fish, 2-3 eggs and a generous vegetable portion where appropriate.
+Avoid obviously tiny portions. Reuse ingredients intelligently without repeating exactly the same dish too often.
+Do not write full recipes. Give name, description and ingredient quantities.
+Costs are calculated by the application from external price data. Return only the requested JSON.""",
+        "recipe": "Generate a detailed recipe in English from the planned meal, inventory and shopping list. Strictly respect allergies, disliked foods and equipment. Give simple numbered steps suitable for a student. If web research is available, prefer real, credible recipes and include sources.",
+        "question": "Answer the user's question about this meal in English without changing the plan.",
+        "recipe_question": "Answer the user's question about this recipe in English. Be practical and precise.",
+        "replace": "Replace only the requested meal. Strictly respect constraints, normal portions, budget and inventory. Return only a PlannedMeal JSON object.",
     },
 }
 
@@ -47,9 +46,31 @@ def _inventory_payload(inventory: list[InventoryItem]) -> list[dict]:
     return [{"name": item.name, "quantity": item.quantity, "unit": item.unit, "location": item.location} for item in inventory]
 
 
+def _parse_json(response: str):
+    cleaned = response.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    return cleaned
+
+
 def build_plan_request(config: UserConfig, inventory: list[InventoryItem]) -> LLMRequest:
     payload = {"servings": config.servings, "weekly_budget_eur": config.weekly_budget, "language": config.language, "allergies": config.allergies, "dislikes": config.dislikes, "equipment": config.equipment, "inventory": _inventory_payload(inventory), "required_output_schema": MealPlan.model_json_schema()}
     return LLMRequest(system=TEXT[config.language]["system"], prompt=json.dumps(payload, ensure_ascii=False, indent=2), json_mode=True)
+
+
+def build_day_options_request(config: UserConfig, inventory: list[InventoryItem], existing: list[PlannedMeal], day: str) -> LLMRequest:
+    schema = TypeAdapter(list[PlannedMeal]).json_schema()
+    payload = {"day": day, "servings": config.servings, "weekly_budget_eur": config.weekly_budget, "allergies": config.allergies, "dislikes": config.dislikes, "equipment": config.equipment, "inventory": _inventory_payload(inventory), "already_selected_meals": [meal.model_dump() for meal in existing], "required_output_schema": schema, "rules": {"options": 4, "two_lunches": 2, "two_dinners": 2, "normal_portions": True}}
+    return LLMRequest(system=TEXT[config.language]["system"], prompt=json.dumps(payload, ensure_ascii=False, indent=2), json_mode=True, web_search=config.llm.web_search)
+
+
+def generate_day_options(provider: LLMProvider, config: UserConfig, inventory: list[InventoryItem], existing: list[PlannedMeal], day: str) -> list[PlannedMeal]:
+    options = TypeAdapter(list[PlannedMeal]).validate_json(_parse_json(provider.generate(build_day_options_request(config, inventory, existing, day))))
+    if len(options) != 4: raise ValueError(f"Expected 4 options for {day}, received {len(options)}")
+    lunches = [m for m in options if m.meal.casefold() in {"déjeuner", "dejeuner", "lunch"}]
+    dinners = [m for m in options if m.meal.casefold() in {"dîner", "diner", "dinner"}]
+    if len(lunches) != 2 or len(dinners) != 2: raise ValueError(f"The model did not return 2 lunch and 2 dinner options for {day}")
+    return options
 
 
 def _normalise(value: float, unit: str) -> tuple[float, str]:
@@ -70,66 +91,42 @@ def _inventory_quantity(name: str, unit: str, inventory: list[InventoryItem]) ->
     return total
 
 
-def price_plan(plan: MealPlan, config: UserConfig, inventory: list[InventoryItem]) -> MealPlan:
+def build_shopping_list(plan: MealPlan, inventory: list[InventoryItem], pricing: PriceService | None = None) -> list[MealIngredient]:
+    grouped: dict[tuple[str, str], dict[str, float | str]] = {}
+    for meal in plan.meals:
+        for ingredient in meal.ingredients:
+            quantity, unit = _normalise(ingredient.quantity, ingredient.unit); key = (ingredient.name.casefold(), unit)
+            if key not in grouped: grouped[key] = {"name": ingredient.name, "quantity": 0.0, "unit": unit}
+            grouped[key]["quantity"] = float(grouped[key]["quantity"]) + quantity
+    result: list[MealIngredient] = []; pricing = pricing or PriceService()
+    for item in grouped.values():
+        name = str(item["name"]); unit = str(item["unit"]); required = float(item["quantity"])
+        missing = max(0.0, required - _inventory_quantity(name, unit, inventory))
+        if missing <= 0: continue
+        estimate = pricing.estimate(name)
+        result.append(MealIngredient(name=name, quantity=round(missing, 2), unit=unit, estimated_cost=estimate.purchase_cost(missing, unit) if estimate else None))
+    return result
+
+
+def price_plan(plan: MealPlan, config: UserConfig, inventory: list[InventoryItem], enforce_budget: bool = True) -> MealPlan:
     pricing = PriceService()
     for meal in plan.meals:
         meal_cost = 0.0
         for ingredient in meal.ingredients:
-            required_value, required_unit = _normalise(ingredient.quantity, ingredient.unit)
-            estimate = pricing.estimate(ingredient.name)
+            required_value, required_unit = _normalise(ingredient.quantity, ingredient.unit); estimate = pricing.estimate(ingredient.name)
             ingredient.estimated_cost = estimate.cost_for(required_value, required_unit) if estimate else None
             if ingredient.estimated_cost is not None: meal_cost += ingredient.estimated_cost
         meal.estimated_cost = round(meal_cost, 2) if meal_cost else None
     shopping = build_shopping_list(plan, inventory, pricing)
-    plan.shopping_cost = round(sum(item.estimated_cost or 0 for item in shopping), 2)
-    plan.total_food_cost = round(sum(meal.estimated_cost or 0 for meal in plan.meals), 2)
-    if plan.shopping_cost > config.weekly_budget + 0.01:
-        raise ValueError(f"Plan exceeds weekly shopping budget: {plan.shopping_cost:.2f} > {config.weekly_budget:.2f} EUR")
+    plan.shopping_cost = round(sum(item.estimated_cost or 0 for item in shopping), 2); plan.total_food_cost = round(sum(meal.estimated_cost or 0 for meal in plan.meals), 2)
+    if enforce_budget and plan.shopping_cost > config.weekly_budget + 0.01: raise ValueError(f"Plan exceeds weekly shopping budget: {plan.shopping_cost:.2f} > {config.weekly_budget:.2f} EUR")
     return plan
-
-
-def _parse_json(response: str):
-    cleaned = response.strip()
-    if cleaned.startswith("```"): cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    return cleaned
 
 
 def generate_plan(provider: LLMProvider, config: UserConfig, inventory: list[InventoryItem]) -> MealPlan:
     plan = MealPlan.model_validate_json(_parse_json(provider.generate(build_plan_request(config, inventory))))
     if len(plan.meals) != 14: raise ValueError(f"Expected 14 meals, received {len(plan.meals)}")
     return price_plan(plan, config, inventory)
-
-
-def build_shopping_list(plan: MealPlan, inventory: list[InventoryItem], pricing: PriceService | None = None) -> list[MealIngredient]:
-    # Aggregate raw quantities first. MealIngredient requires quantity > 0, so a
-    # temporary zero-valued domain object must not be constructed during grouping.
-    grouped: dict[tuple[str, str], dict[str, float | str]] = {}
-    for meal in plan.meals:
-        for ingredient in meal.ingredients:
-            quantity, unit = _normalise(ingredient.quantity, ingredient.unit)
-            key = (ingredient.name.casefold(), unit)
-            if key not in grouped:
-                grouped[key] = {"name": ingredient.name, "quantity": 0.0, "unit": unit}
-            grouped[key]["quantity"] = float(grouped[key]["quantity"]) + quantity
-
-    result: list[MealIngredient] = []
-    pricing = pricing or PriceService()
-    for item in grouped.values():
-        name = str(item["name"])
-        unit = str(item["unit"])
-        required = float(item["quantity"])
-        missing = max(0.0, required - _inventory_quantity(name, unit, inventory))
-        if missing > 0:
-            estimate = pricing.estimate(name)
-            result.append(
-                MealIngredient(
-                    name=name,
-                    quantity=round(missing, 2),
-                    unit=unit,
-                    estimated_cost=estimate.purchase_cost(missing, unit) if estimate else None,
-                )
-            )
-    return result
 
 
 def build_recipe_request(config: UserConfig, meal: PlannedMeal, inventory: list[InventoryItem], shopping: list[MealIngredient]) -> LLMRequest:
