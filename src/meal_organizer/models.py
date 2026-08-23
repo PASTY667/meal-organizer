@@ -19,4 +19,4 @@ class PlannedMeal(BaseModel):
 class MealPlan(BaseModel):
     meals: list[PlannedMeal]
     total_estimated_cost: float = Field(ge=0)
-    notes: list[str] = []
+    notes: list[str] = Field(default_factory=list)
