@@ -1,12 +1,6 @@
 # Meal Organizer
 
-A local-first Python CLI for planning affordable, balanced meals from what you already have.
-
-## Current status
-
-The repository currently contains the first working foundation: a Rich/Typer CLI, local SQLite inventory, interactive setup, LLM provider abstraction for Ollama and OpenRouter, and an external price-estimation adapter for Open Prices.
-
-The application is local-first. User settings live in `~/.meal-organizer/.env` and inventory lives in `~/.meal-organizer/`. The `.env` file is ignored by Git and should never be committed because it may contain an OpenRouter API key.
+Meal Organizer is a local-first Python CLI for planning affordable, balanced meals from what you already have, while building a realistic weekly shopping list.
 
 ## Install
 
@@ -17,65 +11,50 @@ python -m pip install -e .
 meal-organizer setup
 ```
 
-`setup` creates or updates `~/.meal-organizer/.env` and guides you through the LLM configuration. You can choose between a local Ollama model and OpenRouter. When Ollama is selected, the setup checks the local Ollama server and shows installed models when available. When OpenRouter is selected, it asks for the model and API key without echoing the key.
+The setup wizard stores the complete configuration in `~/.meal-organizer/.env`. API keys are never committed to the repository.
 
-For development:
+## Setup
 
-```bash
-python -m pip install -e '.[dev]'
-pytest
-ruff check .
-```
+The wizard lets you choose French or English. The selected language controls CLI prompts, generated meal plans, questions and recipes.
 
-## Main commands
+For the LLM you can choose Ollama for a local model or OpenRouter for a hosted model. When OpenRouter is selected, web search can be enabled for recipe research.
+
+## Main workflow
 
 ```text
 meal-organizer setup
-meal-organizer doctor
-meal-organizer inventory list
-meal-organizer inventory add "rice" 500 --unit g --location cupboard
-meal-organizer inventory remove "rice"
-meal-organizer price "eggs"
+meal-organizer inventory add "riz" 500 --unit g --location cupboard
+meal-organizer inventory add "oeufs" 6 --unit unit --location fridge
 meal-organizer plan
-meal-organizer cook "chicken curry"
 ```
 
-## Configuration
+`plan` creates exactly two meals per day, lunch and dinner. It uses the current inventory as a starting point but is not limited to it. The generated plan is persisted locally and the CLI shows a separate shopping list calculated from the ingredients required by the whole week.
 
-The generated configuration uses environment variables in `~/.meal-organizer/.env`. A template is available at `.env.example`.
+The planning session is interactive: accept it, pause it, ask a question about a meal, or replace a meal. A paused plan can be resumed with:
 
-For Ollama:
-
-```text
-MEAL_ORGANIZER_LLM_PROVIDER=ollama
-MEAL_ORGANIZER_OLLAMA_MODEL="qwen3:8b"
-MEAL_ORGANIZER_OLLAMA_HOST="http://127.0.0.1:11434"
+```bash
+meal-organizer plan --resume
 ```
 
-For OpenRouter:
+Once a plan is accepted, recipes are generated on demand:
 
-```text
-MEAL_ORGANIZER_LLM_PROVIDER=openrouter
-MEAL_ORGANIZER_OPENROUTER_MODEL="your/provider-model"
-MEAL_ORGANIZER_OPENROUTER_API_KEY="your-secret-key"
+```bash
+meal-organizer recipe Monday
+meal-organizer cook Monday
 ```
 
-Environment variables beginning with `MEAL_ORGANIZER_` override values from the `.env` file, which makes CI and deployment configuration possible without editing the file.
-
-## LLM providers
-
-Ollama is the default provider and expects a local Ollama server. OpenRouter can be selected during `setup` and requires an API key and model name.
-
-The application keeps providers behind a small interface so the planning domain does not depend on a specific model vendor.
+The recipe generator receives the planned meal, current inventory and shopping list. With OpenRouter web search enabled it can research current recipes and return sources.
 
 ## Pricing
 
-Open Prices is the intended primary external source for price observations. The adapter records source, confidence, observation date and sample count. Price data is an estimate, not a guarantee of the price in a particular shop.
+Open Prices is the primary external price source. Meal Organizer calculates ingredient costs using requested quantities and, when available, product package sizes. The shopping list uses estimated purchase cost rather than pretending that an ingredient already in inventory costs zero.
 
-Open Prices data is provided by Open Food Facts and is subject to its applicable open-data licence and attribution requirements.
+Prices remain estimates and are not guarantees for a particular shop. Open Prices is maintained by Open Food Facts and its data is subject to the applicable OdBL licence and attribution requirements.
 
 ## Design principles
 
-The LLM proposes; application code validates. Allergies and other hard constraints must never be delegated exclusively to a model. Budget calculations and inventory state remain deterministic application data.
+The LLM proposes; application code validates and calculates. Allergies, inventory state, quantities and budget remain application data. Full recipes are not stored inside the weekly plan: the plan stores meal descriptions and ingredients, while recipes are generated and persisted separately when requested.
+
+Meal plans and recipes are stored in SQLite under `~/.meal-organizer/`, so a generation can be paused and resumed without keeping the terminal session open.
 
 The CLI is separated from domain services so a future HTTP/web interface can reuse the same core.
