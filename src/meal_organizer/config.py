@@ -20,10 +20,10 @@ class UserConfig(BaseModel):
     name: str = ""
     servings: int = Field(default=1, ge=1, le=20)
     weekly_budget: float = Field(default=50.0, ge=0)
-    allergies: list[str] = []
-    dislikes: list[str] = []
-    equipment: list[str] = []
-    llm: LLMConfig = LLMConfig()
+    allergies: list[str] = Field(default_factory=list)
+    dislikes: list[str] = Field(default_factory=list)
+    equipment: list[str] = Field(default_factory=list)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
 
 
 class AppSettings(BaseSettings):
