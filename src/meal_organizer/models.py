@@ -6,7 +6,7 @@ class MealIngredient(BaseModel):
     quantity: float = Field(gt=0)
     unit: str
     from_inventory: bool = False
-    estimated_cost: float = Field(default=0, ge=0)
+    estimated_cost: float | None = Field(default=None, ge=0)
 
 
 class PlannedMeal(BaseModel):
@@ -15,7 +15,7 @@ class PlannedMeal(BaseModel):
     name: str
     description: str
     ingredients: list[MealIngredient]
-    estimated_cost: float = Field(default=0, ge=0)
+    estimated_cost: float | None = Field(default=None, ge=0)
     web_researched: bool = False
 
 
