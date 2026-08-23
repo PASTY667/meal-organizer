@@ -35,11 +35,7 @@ class OllamaProvider:
         }
         if request.json_mode:
             payload["format"] = "json"
-        response = httpx.post(
-            f"{self.config.ollama_host.rstrip('/')}/api/chat",
-            json=payload,
-            timeout=120,
-        )
+        response = httpx.post(f"{self.config.ollama_host.rstrip('/')}/api/chat", json=payload, timeout=180)
         response.raise_for_status()
         return response.json()["message"]["content"]
 
@@ -57,13 +53,11 @@ class OpenRouterProvider:
             message = None
         if response.status_code == 401:
             return RuntimeError(
-                "OpenRouter authentication failed (401). Check that the API key is valid, "
-                "active, and starts with 'sk-or-'."
-                + (f" OpenRouter says: {message}" if message else "")
+                "OpenRouter authentication failed (401). Check that the API key is valid, active, "
+                "and starts with 'sk-or-'." + (f" OpenRouter says: {message}" if message else "")
             )
         return RuntimeError(
-            f"OpenRouter request failed ({response.status_code})."
-            + (f" OpenRouter says: {message}" if message else "")
+            f"OpenRouter request failed ({response.status_code})." + (f" OpenRouter says: {message}" if message else "")
         )
 
     def generate(self, request: LLMRequest) -> str:
@@ -79,7 +73,7 @@ class OpenRouterProvider:
         }
         if request.json_mode:
             payload["response_format"] = {"type": "json_object"}
-        if request.web_search and not request.json_mode:
+        if request.web_search:
             payload["plugins"] = [{"id": "web", "max_results": 5}]
         response = httpx.post(
             "https://openrouter.ai/api/v1/chat/completions",
