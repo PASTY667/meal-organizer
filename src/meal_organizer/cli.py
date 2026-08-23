@@ -8,13 +8,13 @@ from rich.table import Table
 from .config import ENV_PATH, LLMConfig, UserConfig, check_ollama, load_config, save_config
 from .db import Database
 from .llm import LLMRequest, create_provider
-from .models import MealPlan, PlannedMeal
+from .models import MealPlan
 from .planning import build_question_request, build_shopping_list, generate_day_options, generate_recipe, price_plan, replace_meal
 from .pricing import PriceService
 
 app = typer.Typer(help="Meal Organizer", no_args_is_help=True)
 console = Console()
-TEXT = {"fr": {"plan":"Plan de la semaine","day":"Jour","meal":"Repas","description":"Description","ingredients":"Ingrédients","cost":"Coût du repas","shopping":"Liste de courses","purchase":"Prix d'achat","total":"Achats estimés","budget":"Budget","pause":"Plan mis en pause. Reprends avec --resume.","saved":"Plan enregistré.","question":"Question","replace":"Remplacer","choose":"Choisis une option","regenerate":"régénérer","quit":"quitter","accept":"valider","no_inventory":"Ajoute d'abord des produits avec 'meal-organizer inventory add'.","no_plan":"Aucun plan enregistré.","recipe":"Recette","steps":"Étapes"},"en": {"plan":"Weekly meal plan","day":"Day","meal":"Meal","description":"Description","ingredients":"Ingredients","cost":"Meal cost","shopping":"Shopping list","purchase":"Purchase price","total":"Estimated purchases","budget":"Budget","pause":"Plan paused. Resume with --resume.","saved":"Plan saved.","question":"Question","replace":"Replace","choose":"Choose an option","regenerate":"regenerate","quit":"quit","accept":"accept","no_inventory":"Add inventory first with 'meal-organizer inventory add'.","no_plan":"No saved plan.","recipe":"Recipe","steps":"Steps"}}
+TEXT = {"fr": {"plan":"Plan de la semaine","day":"Jour","meal":"Repas","description":"Description","ingredients":"Ingrédients","cost":"Coût du repas","shopping":"Liste de courses","purchase":"Prix d'achat","total":"Achats estimés","pause":"Plan mis en pause. Reprends avec --resume.","saved":"Plan enregistré.","question":"Question","choose":"Choisis une option","regenerate":"régénérer","quit":"quitter","accept":"valider","no_inventory":"Ajoute d'abord des produits avec 'meal-organizer inventory add'.","no_plan":"Aucun plan enregistré.","recipe":"Recette"},"en": {"plan":"Weekly meal plan","day":"Day","meal":"Meal","description":"Description","ingredients":"Ingredients","cost":"Meal cost","shopping":"Shopping list","purchase":"Purchase price","total":"Estimated purchases","pause":"Plan paused. Resume with --resume.","saved":"Plan saved.","question":"Question","choose":"Choose an option","regenerate":"regenerate","quit":"quit","accept":"accept","no_inventory":"Add inventory first with 'meal-organizer inventory add'.","no_plan":"No saved plan.","recipe":"Recipe"}}
 DAYS = {"fr":["Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi","Dimanche"],"en":["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]}
 
 def tr(config,key): return TEXT[config.language][key]
@@ -37,8 +37,7 @@ def choose_llm(current,language):
             table=Table(title="Modèles Ollama"); table.add_column("Model")
             for model in models: table.add_row(model)
             console.print(table)
-        model=typer.prompt("Modèle Ollama",default=current.model if current.model in models else (models[0] if models else current.model))
-        return LLMConfig(provider="ollama",model=model,ollama_host=host,web_search=False)
+        model=typer.prompt("Modèle Ollama",default=current.model if current.model in models else (models[0] if models else current.model)); return LLMConfig(provider="ollama",model=model,ollama_host=host,web_search=False)
     model=typer.prompt("Modèle OpenRouter",default=current.openrouter_model or "openai/gpt-4o-mini"); api_key=getpass("OpenRouter API key (paste supported): ") or current.openrouter_api_key; web_search=typer.confirm("Activer la recherche web pour les recettes" if language=="fr" else "Enable web search for recipes",default=current.web_search)
     return LLMConfig(provider="openrouter",model=current.model,ollama_host=current.ollama_host,openrouter_model=model,openrouter_api_key=api_key,web_search=web_search)
 
@@ -101,18 +100,23 @@ def plan(resume:bool=typer.Option(False,"--resume",help="Resume the latest pause
     if saved: plan_id,_,meal_plan=saved; ok("Plan repris." if config.language=="fr" else "Plan resumed.")
     else: meal_plan=MealPlan(meals=[]); plan_id=db.save_plan(meal_plan,"draft")
     for day_index,day in enumerate(DAYS[config.language]):
-        if len(meal_plan.meals)>=day_index*2+2: continue
+        day_count=sum(1 for m in meal_plan.meals if m.day.casefold()==day.casefold())
+        if day_count>=2: continue
         while True:
             with console.status(f"Recherche de plats pour {day}..." if config.language=="fr" else f"Finding dishes for {day}..."):
                 options=generate_day_options(provider,config,inventory,meal_plan.meals,day)
                 for option in options: price_plan(MealPlan(meals=[option]),config,inventory,enforce_budget=False,pricing=pricing)
-            lunch=choose_meal(config,provider,options,"lunch")
-            if lunch is None: db.save_plan(meal_plan,"paused",plan_id); ok(tr(config,"pause")); return
+            lunch=None if day_count==1 else choose_meal(config,provider,options,"lunch")
+            if day_count==0 and lunch is None: db.save_plan(meal_plan,"paused",plan_id); ok(tr(config,"pause")); return
             if lunch=="REGENERATE": continue
+            if lunch is not None:
+                meal_plan.meals.append(lunch); price_plan(meal_plan,config,inventory,enforce_budget=False,pricing=pricing); db.save_plan(meal_plan,"draft",plan_id)
             dinner=choose_meal(config,provider,options,"dinner")
             if dinner is None: db.save_plan(meal_plan,"paused",plan_id); ok(tr(config,"pause")); return
-            if dinner=="REGENERATE": continue
-            meal_plan.meals.extend([lunch,dinner]); price_plan(meal_plan,config,inventory,enforce_budget=False,pricing=pricing); db.save_plan(meal_plan,"draft",plan_id); console.print(Panel(f"{day} — {lunch.name} / {dinner.name}\n{tr(config,'total')}: {meal_plan.shopping_cost:.2f} € / {config.weekly_budget:.2f} €",border_style="green")); break
+            if dinner=="REGENERATE":
+                if lunch is not None: meal_plan.meals.pop()
+                continue
+            meal_plan.meals.append(dinner); price_plan(meal_plan,config,inventory,enforce_budget=False,pricing=pricing); db.save_plan(meal_plan,"draft",plan_id); console.print(Panel(f"{day} — {meal_plan.meals[-2].name if day_count==0 else '—'} / {dinner.name}\n{tr(config,'total')}: {meal_plan.shopping_cost:.2f} € / {config.weekly_budget:.2f} €",border_style="green")); break
     price_plan(meal_plan,config,inventory,enforce_budget=False,pricing=pricing); show_summary(config,meal_plan,build_shopping_list(meal_plan,inventory,pricing))
     if meal_plan.shopping_cost>config.weekly_budget: warn(f"Budget dépassé : {meal_plan.shopping_cost:.2f} € > {config.weekly_budget:.2f} €" if config.language=="fr" else f"Budget exceeded: {meal_plan.shopping_cost:.2f} € > {config.weekly_budget:.2f} €")
     action=typer.prompt(f"{tr(config,'accept')} / {tr(config,'pause')} / {tr(config,'quit')}",default=tr(config,'accept')).strip().lower()
@@ -121,8 +125,8 @@ def plan(resume:bool=typer.Option(False,"--resume",help="Resume the latest pause
 
 @app.command()
 def price(product:str):
-    estimate=PriceService().estimate(product)
-    if not estimate: fail("Aucun prix externe trouvé." if load_config().language=="fr" else "No external price found."); raise typer.Exit(1)
+    config=load_config(); estimate=PriceService().estimate(product)
+    if not estimate: fail("Aucun prix externe trouvé." if config.language=="fr" else "No external price found."); raise typer.Exit(1)
     table=Table(title=f"Prix — {product}"); table.add_column("Prix observé"); table.add_column("Unité"); table.add_column("Conditionnement"); table.add_column("Confiance"); table.add_row(f"{estimate.price:.2f} €",estimate.price_per or "—",f"{estimate.package_quantity:g} {estimate.package_unit}" if estimate.package_quantity else "—",estimate.confidence); console.print(table)
 
 @app.command()
