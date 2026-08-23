@@ -8,14 +8,17 @@ from rich.table import Table
 from .config import ENV_PATH, LLMConfig, UserConfig, check_ollama, load_config, save_config
 from .db import Database
 from .llm import LLMRequest, create_provider
-from .models import MealPlan
-from .planning import build_question_request, build_shopping_list, generate_day_options, generate_recipe, price_plan, replace_meal
+from .models import MealPlan, PlannedMeal
+from .planning import build_question_request, build_shopping_list, generate_plan, generate_recipe, price_plan, replace_meal
 from .pricing import PriceService
 
 app = typer.Typer(help="Meal Organizer", no_args_is_help=True)
 console = Console()
-TEXT = {"fr": {"plan":"Plan de la semaine","day":"Jour","meal":"Repas","description":"Description","ingredients":"Ingrédients","cost":"Coût du repas","shopping":"Liste de courses","purchase":"Prix d'achat","total":"Achats estimés","pause":"Plan mis en pause. Reprends avec --resume.","saved":"Plan enregistré.","question":"Question","choose":"Choisis une option","regenerate":"régénérer","quit":"quitter","accept":"valider","no_inventory":"Ajoute d'abord des produits avec 'meal-organizer inventory add'.","no_plan":"Aucun plan enregistré.","recipe":"Recette"},"en": {"plan":"Weekly meal plan","day":"Day","meal":"Meal","description":"Description","ingredients":"Ingredients","cost":"Meal cost","shopping":"Shopping list","purchase":"Purchase price","total":"Estimated purchases","pause":"Plan paused. Resume with --resume.","saved":"Plan saved.","question":"Question","choose":"Choose an option","regenerate":"regenerate","quit":"quit","accept":"accept","no_inventory":"Add inventory first with 'meal-organizer inventory add'.","no_plan":"No saved plan.","recipe":"Recipe"}}
-DAYS = {"fr":["Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi","Dimanche"],"en":["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]}
+TEXT = {
+    "fr": {"plan":"Plan de la semaine","day":"Jour","meal":"Repas","description":"Description","ingredients":"Ingrédients","shopping":"Liste de courses","purchase":"Prix d'achat","total":"Total des achats","pause":"Plan mis en pause. Reprends avec --resume.","saved":"Plan enregistré.","question":"Question","accept":"valider","quit":"quitter","no_inventory":"Ajoute d'abord des produits avec 'meal-organizer inventory add'.","no_plan":"Aucun plan enregistré.","recipe":"Recette","meals":"Plats de la semaine","cost_unknown":"prix indisponible","stock":"Déjà en stock","generate":"Générer la recette","cook":"Mode cuisine","replace":"remplacer","help":"valider, pause, remplacer <jour> <déjeuner|dîner>, question <jour> <déjeuner|dîner>, quitter"},
+    "en": {"plan":"Weekly meal plan","day":"Day","meal":"Meal","description":"Description","ingredients":"Ingredients","shopping":"Shopping list","purchase":"Purchase price","total":"Total purchases","pause":"Plan paused. Resume with --resume.","saved":"Plan saved.","question":"Question","accept":"accept","quit":"quit","no_inventory":"Add inventory first with 'meal-organizer inventory add'.","no_plan":"No saved plan.","recipe":"Recipe","meals":"Weekly meals","cost_unknown":"price unavailable","stock":"Already in stock","generate":"Generate recipe","cook":"Cooking mode","replace":"replace","help":"accept, pause, replace <day> <lunch|dinner>, question <day> <lunch|dinner>, quit"},
+}
+DAYS={"fr":["Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi","Dimanche"],"en":["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]}
 
 def tr(config,key): return TEXT[config.language][key]
 def ok(message): console.print(f"[bold green]✓[/bold green] {message}")
@@ -34,11 +37,11 @@ def choose_llm(current,language):
     if provider=="ollama":
         host=typer.prompt("URL Ollama",default=current.ollama_host); reachable,models=check_ollama(host)
         if reachable and models:
-            table=Table(title="Modèles Ollama"); table.add_column("Model")
+            table=Table(title="Modèles Ollama" if language=="fr" else "Ollama models"); table.add_column("Model")
             for model in models: table.add_row(model)
             console.print(table)
-        model=typer.prompt("Modèle Ollama",default=current.model if current.model in models else (models[0] if models else current.model)); return LLMConfig(provider="ollama",model=model,ollama_host=host,web_search=False)
-    model=typer.prompt("Modèle OpenRouter",default=current.openrouter_model or "openai/gpt-4o-mini"); api_key=getpass("OpenRouter API key (paste supported): ") or current.openrouter_api_key; web_search=typer.confirm("Activer la recherche web pour les recettes" if language=="fr" else "Enable web search for recipes",default=current.web_search)
+        model=typer.prompt("Modèle Ollama" if language=="fr" else "Ollama model",default=current.model if current.model in models else (models[0] if models else current.model)); return LLMConfig(provider="ollama",model=model,ollama_host=host,web_search=False)
+    model=typer.prompt("Modèle OpenRouter" if language=="fr" else "OpenRouter model",default=current.openrouter_model or "openai/gpt-4o-mini"); api_key=getpass("OpenRouter API key (paste supported): ") or current.openrouter_api_key; web_search=typer.confirm("Activer la recherche web" if language=="fr" else "Enable web search",default=current.web_search)
     return LLMConfig(provider="openrouter",model=current.model,ollama_host=current.ollama_host,openrouter_model=model,openrouter_api_key=api_key,web_search=web_search)
 
 @app.command()
@@ -50,7 +53,7 @@ def setup():
 
 @app.command()
 def doctor():
-    config=load_config(); table=Table(title="System check"); table.add_column("Component"); table.add_column("Status"); table.add_column("Details"); table.add_row("Config","[green]OK[/green]",str(ENV_PATH)); table.add_row("SQLite","[green]OK[/green]","local")
+    config=load_config(); table=Table(title="Vérification système" if config.language=="fr" else "System check"); table.add_column("Component"); table.add_column("Status"); table.add_column("Details"); table.add_row("Config","[green]OK[/green]",str(ENV_PATH)); table.add_row("SQLite","[green]OK[/green]","local")
     try: create_provider(config.llm).generate(LLMRequest(system="Reply OK only.",prompt="OK")); table.add_row("LLM","[green]OK[/green]",config.llm.provider)
     except Exception as exc: table.add_row("LLM","[red]FAIL[/red]",str(exc)[:120])
     console.print(table)
@@ -69,84 +72,108 @@ def inventory_remove(name:str):
     if Database().remove_inventory(name): ok(f"{name} removed.")
     else: fail(f"{name} not found."); raise typer.Exit(1)
 
-def show_summary(config,plan,shopping):
-    table=Table(title=tr(config,"plan"),expand=True)
-    for c in [tr(config,"day"),tr(config,"meal"),tr(config,"description"),tr(config,"ingredients"),tr(config,"cost")]: table.add_column(c)
-    for meal in plan.meals:
-        ingredients=", ".join(f"{i.quantity:g} {i.unit} {i.name}" for i in meal.ingredients); cost=f"{meal.estimated_cost:.2f} €" if meal.estimated_cost is not None else "—"; table.add_row(meal.day,meal.meal,f"[bold]{meal.name}[/bold]\n{meal.description}",ingredients,cost)
-    console.print(table); shop=Table(title=tr(config,"shopping")); shop.add_column(tr(config,"ingredients")); shop.add_column("Qté" if config.language=="fr" else "Qty"); shop.add_column(tr(config,"purchase"))
-    for item in shopping: shop.add_row(item.name,f"{item.quantity:g} {item.unit}",f"{item.estimated_cost:.2f} €" if item.estimated_cost is not None else "indisponible")
-    console.print(shop); console.print(Panel(f"[bold]{tr(config,'total')}: {plan.shopping_cost:.2f} € / {config.weekly_budget:.2f} €[/bold]",border_style="green"))
+def _meal_for(plan:MealPlan, day:str, meal:str)->PlannedMeal|None:
+    aliases={"lunch":{"lunch","déjeuner","dejeuner"},"dinner":{"dinner","dîner","diner"}}
+    wanted=aliases.get(meal.casefold(),{meal.casefold()})
+    return next((m for m in plan.meals if m.day.casefold()==day.casefold() and m.meal.casefold() in wanted),None)
 
-def choose_meal(config,provider,options,meal_type):
-    allowed={"déjeuner","dejeuner","lunch"} if meal_type=="lunch" else {"dîner","diner","dinner"}; candidates=[m for m in options if m.meal.casefold() in allowed]
-    table=Table(title="Déjeuner" if meal_type=="lunch" and config.language=="fr" else "Lunch" if meal_type=="lunch" else "Dîner" if config.language=="fr" else "Dinner"); table.add_column("#"); table.add_column("Plat"); table.add_column("Description"); table.add_column("Coût")
-    for i,m in enumerate(candidates,1): table.add_row(str(i),m.name,m.description,f"{m.estimated_cost:.2f} €" if m.estimated_cost is not None else "—")
+def _show_week(config,plan):
+    table=Table(title=tr(config,"meals"),expand=True); table.add_column(tr(config,"day"),width=11); table.add_column(tr(config,"meal"),width=11); table.add_column("Plat" if config.language=="fr" else "Dish",width=30); table.add_column(tr(config,"description"),ratio=2)
+    for meal in plan.meals: table.add_row(meal.day,meal.meal,meal.name,meal.description)
     console.print(table)
-    while True:
-        value=typer.prompt(f"{tr(config,'choose')} (1/2, q, r, p)").strip().lower()
-        if value=="p": return None
-        if value=="r": return "REGENERATE"
-        if value=="q":
-            idx=typer.prompt("Option",type=int); question=typer.prompt(tr(config,"question")); console.print(Panel(provider.generate(build_question_request(config,candidates[idx-1],question)),title=tr(config,"question"),border_style="cyan")); continue
-        if value in {"1","2"}: return candidates[int(value)-1]
-        warn("Choisis 1, 2, q, r ou p." if config.language=="fr" else "Choose 1, 2, q, r or p.")
+
+def _show_shopping(config,shopping,total,budget):
+    table=Table(title=tr(config,"shopping")); table.add_column(tr(config,"ingredients")); table.add_column("Qté" if config.language=="fr" else "Qty",justify="right"); table.add_column(tr(config,"purchase"),justify="right")
+    for item in shopping: table.add_row(item.name,f"{item.quantity:g} {item.unit}",f"{item.estimated_cost:.2f} €" if item.estimated_cost is not None else tr(config,"cost_unknown"))
+    console.print(table)
+    label=f"{tr(config,'total')}: {total:.2f} € / {budget:.2f} €" if shopping else ("Aucun achat nécessaire : le stock couvre le plan." if config.language=="fr" else "No purchases needed: inventory covers the plan.")
+    console.print(Panel(f"[bold]{label}[/bold]",border_style="green" if total<=budget else "red"))
+
+def _show_day_recipe_menu(config,day,plan):
+    choices=[m for m in plan.meals if m.day.casefold()==day.casefold()]
+    if not choices: return None
+    table=Table(title=day); table.add_column("#"); table.add_column(tr(config,"meal")); table.add_column("Plat" if config.language=="fr" else "Dish")
+    for i,m in enumerate(choices,1): table.add_row(str(i),m.meal,m.name)
+    console.print(table); choice=typer.prompt("Choisis un repas (1/2)" if config.language=="fr" else "Choose a meal (1/2)",type=int)
+    return choices[choice-1] if 1<=choice<=len(choices) else None
 
 @app.command()
 def plan(resume:bool=typer.Option(False,"--resume",help="Resume the latest paused/draft plan")):
     config=load_config(); db=Database(); inventory=db.list_inventory()
     if not inventory: fail(tr(config,"no_inventory")); raise typer.Exit(1)
     provider=create_provider(config.llm); pricing=PriceService(); saved=db.load_latest_plan() if resume else None
-    if saved: plan_id,_,meal_plan=saved; ok("Plan repris." if config.language=="fr" else "Plan resumed.")
-    else: meal_plan=MealPlan(meals=[]); plan_id=db.save_plan(meal_plan,"draft")
-    for day_index,day in enumerate(DAYS[config.language]):
-        day_count=sum(1 for m in meal_plan.meals if m.day.casefold()==day.casefold())
-        if day_count>=2: continue
-        while True:
-            with console.status(f"Recherche de plats pour {day}..." if config.language=="fr" else f"Finding dishes for {day}..."):
-                options=generate_day_options(provider,config,inventory,meal_plan.meals,day)
-                for option in options: price_plan(MealPlan(meals=[option]),config,inventory,enforce_budget=False,pricing=pricing)
-            lunch=None if day_count==1 else choose_meal(config,provider,options,"lunch")
-            if day_count==0 and lunch is None: db.save_plan(meal_plan,"paused",plan_id); ok(tr(config,"pause")); return
-            if lunch=="REGENERATE": continue
-            if lunch is not None:
-                meal_plan.meals.append(lunch); price_plan(meal_plan,config,inventory,enforce_budget=False,pricing=pricing); db.save_plan(meal_plan,"draft",plan_id)
-            dinner=choose_meal(config,provider,options,"dinner")
-            if dinner is None: db.save_plan(meal_plan,"paused",plan_id); ok(tr(config,"pause")); return
-            if dinner=="REGENERATE":
-                if lunch is not None: meal_plan.meals.pop()
-                continue
-            meal_plan.meals.append(dinner); price_plan(meal_plan,config,inventory,enforce_budget=False,pricing=pricing); db.save_plan(meal_plan,"draft",plan_id); console.print(Panel(f"{day} — {meal_plan.meals[-2].name if day_count==0 else '—'} / {dinner.name}\n{tr(config,'total')}: {meal_plan.shopping_cost:.2f} € / {config.weekly_budget:.2f} €",border_style="green")); break
-    price_plan(meal_plan,config,inventory,enforce_budget=False,pricing=pricing); show_summary(config,meal_plan,build_shopping_list(meal_plan,inventory,pricing))
-    if meal_plan.shopping_cost>config.weekly_budget: warn(f"Budget dépassé : {meal_plan.shopping_cost:.2f} € > {config.weekly_budget:.2f} €" if config.language=="fr" else f"Budget exceeded: {meal_plan.shopping_cost:.2f} € > {config.weekly_budget:.2f} €")
-    action=typer.prompt(f"{tr(config,'accept')} / {tr(config,'pause')} / {tr(config,'quit')}",default=tr(config,'accept')).strip().lower()
-    if action.startswith("p"): db.save_plan(meal_plan,"paused",plan_id); ok(tr(config,"pause")); return
-    db.save_plan(meal_plan,"accepted",plan_id); ok(tr(config,"saved"))
+    if saved:
+        plan_id,_,meal_plan=saved; ok("Plan repris." if config.language=="fr" else "Plan resumed.")
+    else:
+        with console.status("Analyse globale de la semaine et génération du plan..." if config.language=="fr" else "Globally optimizing the week and generating the plan..."):
+            try: meal_plan=generate_plan(provider,config,inventory)
+            except Exception as exc: fail(str(exc)); raise typer.Exit(1) from exc
+        plan_id=db.save_plan(meal_plan,"draft")
+    while True:
+        price_plan(meal_plan,config,inventory,enforce_budget=False,pricing=pricing); shopping=build_shopping_list(meal_plan,inventory,pricing)
+        _show_week(config,meal_plan); _show_shopping(config,shopping,meal_plan.shopping_cost,config.weekly_budget)
+        action=typer.prompt(f"Action ({tr(config,'help')})",default=tr(config,"accept")).strip(); parts=action.split(maxsplit=2); command=parts[0].casefold()
+        if command in {"valider","accept","ok"}:
+            db.save_plan(meal_plan,"accepted",plan_id); ok(tr(config,"saved")); return
+        if command in {"pause","p"}:
+            db.save_plan(meal_plan,"paused",plan_id); ok(tr(config,"pause")); return
+        if command in {"quitter","quit","q"}:
+            db.save_plan(meal_plan,"paused",plan_id); ok(tr(config,"pause")); return
+        if command in {"remplacer","replace"} and len(parts)>=3:
+            target=_meal_for(meal_plan,parts[1],parts[2])
+            if not target: warn("Repas introuvable." if config.language=="fr" else "Meal not found."); continue
+            reason=typer.prompt("Pourquoi le remplacer ?" if config.language=="fr" else "Why replace it?",default="")
+            with console.status("Recherche d'une alternative..." if config.language=="fr" else "Finding an alternative..."):
+                replacement=replace_meal(provider,config,target,inventory,reason); meal_plan.meals[meal_plan.meals.index(target)]=replacement
+            db.save_plan(meal_plan,"draft",plan_id); continue
+        if command in {"question","ask"} and len(parts)>=3:
+            target=_meal_for(meal_plan,parts[1],parts[2])
+            if not target: warn("Repas introuvable." if config.language=="fr" else "Meal not found."); continue
+            question=typer.prompt(tr(config,"question")); console.print(Panel(provider.generate(build_question_request(config,target,question)),title=tr(config,"question"),border_style="cyan")); continue
+        warn("Commande inconnue." if config.language=="fr" else "Unknown command.")
+
+@app.command("meals")
+def meals():
+    config=load_config(); saved=Database().load_latest_plan(("accepted","draft","paused"))
+    if not saved: fail(tr(config,"no_plan")); raise typer.Exit(1)
+    _show_week(config,saved[2])
+
+@app.command()
+def recipe(day:str,meal:str):
+    config=load_config(); db=Database(); saved=db.load_latest_plan(("accepted","draft","paused"))
+    if not saved: fail(tr(config,"no_plan")); raise typer.Exit(1)
+    plan_id,_,meal_plan=saved; target=_meal_for(meal_plan,day,meal)
+    if not target: fail("Repas introuvable." if config.language=="fr" else "Meal not found."); raise typer.Exit(1)
+    inventory=db.list_inventory(); shopping=build_shopping_list(meal_plan,inventory); provider=create_provider(config.llm)
+    with console.status("Recherche de recettes et génération..." if config.language=="fr" else "Researching recipes and generating..."):
+        generated=generate_recipe(provider,config,target,inventory,shopping)
+    key=f"{target.day}:{target.meal}"; db.save_recipe(plan_id,key,generated)
+    console.print(Panel(f"[bold]{generated.name}[/bold]\n{generated.description}\n\nPréparation: {generated.preparation_minutes} min · Cuisson: {generated.cooking_minutes} min" if config.language=="fr" else f"[bold]{generated.name}[/bold]\n{generated.description}\n\nPrep: {generated.preparation_minutes} min · Cook: {generated.cooking_minutes} min",title=tr(config,"recipe"),border_style="yellow"))
+    console.print("Utilise 'meal-organizer cook <jour> <déjeuner|dîner>' pour cuisiner étape par étape." if config.language=="fr" else "Use 'meal-organizer cook <day> <lunch|dinner>' to cook step by step.")
+
+@app.command()
+def cook(day:str,meal:str):
+    config=load_config(); db=Database(); saved=db.load_latest_plan(("accepted",))
+    if not saved: fail("Le plan doit être validé avant le mode cuisine." if config.language=="fr" else "The plan must be accepted before cooking mode."); raise typer.Exit(1)
+    plan_id,_,meal_plan=saved; target=_meal_for(meal_plan,day,meal)
+    if not target: fail("Repas introuvable." if config.language=="fr" else "Meal not found."); raise typer.Exit(1)
+    key=f"{target.day}:{target.meal}"; recipe_data=db.load_recipe(plan_id,key)
+    if not recipe_data:
+        inventory=db.list_inventory(); shopping=build_shopping_list(meal_plan,inventory)
+        with console.status("Génération de la recette..." if config.language=="fr" else "Generating recipe..."): recipe_data=generate_recipe(create_provider(config.llm),config,target,inventory,shopping)
+        db.save_recipe(plan_id,key,recipe_data)
+    console.print(Panel(f"[bold]{recipe_data.name}[/bold]",title=tr(config,"cook"),border_style="yellow"))
+    for i,step in enumerate(recipe_data.steps,1):
+        console.print(Panel(f"[bold]Étape {i}/{len(recipe_data.steps)}[/bold]\n{step}" if config.language=="fr" else f"[bold]Step {i}/{len(recipe_data.steps)}[/bold]\n{step}",border_style="cyan"))
+        if i<len(recipe_data.steps):
+            action=typer.prompt("Entrée pour continuer, q pour quitter",default="",show_default=False)
+            if action.casefold()=="q": return
+    ok("Bon appétit." if config.language=="fr" else "Enjoy your meal.")
 
 @app.command()
 def price(product:str):
     config=load_config(); estimate=PriceService().estimate(product)
-    if not estimate: fail("Aucun prix externe trouvé." if config.language=="fr" else "No external price found."); raise typer.Exit(1)
-    table=Table(title=f"Prix — {product}"); table.add_column("Prix observé"); table.add_column("Unité"); table.add_column("Conditionnement"); table.add_column("Confiance"); table.add_row(f"{estimate.price:.2f} €",estimate.price_per or "—",f"{estimate.package_quantity:g} {estimate.package_unit}" if estimate.package_quantity else "—",estimate.confidence); console.print(table)
-
-@app.command()
-def recipe(day:str):
-    config=load_config(); db=Database(); saved=db.load_latest_plan(("accepted","draft","paused"))
-    if not saved: fail(tr(config,"no_plan")); raise typer.Exit(1)
-    plan_id,_,meal_plan=saved; target=next((m for m in meal_plan.meals if m.day.casefold()==day.casefold()),None)
-    if not target: fail("Jour introuvable." if config.language=="fr" else "Day not found."); raise typer.Exit(1)
-    inventory=db.list_inventory(); shopping=build_shopping_list(meal_plan,inventory); generated=generate_recipe(create_provider(config.llm),config,target,inventory,shopping); db.save_recipe(plan_id,target.day,generated); console.print(Panel(f"[bold]{generated.name}[/bold]\n{generated.description}\n\n"+"\n".join(f"{i+1}. {s}" for i,s in enumerate(generated.steps)),title=tr(config,"recipe"),border_style="yellow"))
-
-@app.command()
-def cook(day:str):
-    config=load_config(); db=Database(); saved=db.load_latest_plan(("accepted",))
-    if not saved: fail(tr(config,"no_plan")); raise typer.Exit(1)
-    plan_id,_,meal_plan=saved; target=next((m for m in meal_plan.meals if m.day.casefold()==day.casefold()),None)
-    if not target: fail("Jour introuvable." if config.language=="fr" else "Day not found."); raise typer.Exit(1)
-    recipe_data=db.load_recipe(plan_id,target.day)
-    if not recipe_data:
-        inventory=db.list_inventory(); recipe_data=generate_recipe(create_provider(config.llm),config,target,inventory,build_shopping_list(meal_plan,inventory)); db.save_recipe(plan_id,target.day,recipe_data)
-    console.print(Panel(f"[bold]{recipe_data.name}[/bold]",title="COOKING MODE",border_style="yellow"))
-    for i,step in enumerate(recipe_data.steps,1): console.print(Panel(f"Étape {i}/{len(recipe_data.steps)}\n{step}" if config.language=="fr" else f"Step {i}/{len(recipe_data.steps)}\n{step}")); typer.prompt("Entrée pour continuer",default="",show_default=False)
+    if not estimate: fail("Aucun prix externe fiable trouvé." if config.language=="fr" else "No reliable external price found."); raise typer.Exit(1)
+    table=Table(title=f"Prix — {product}"); table.add_column("Prix"); table.add_column("Unité"); table.add_column("Conditionnement"); table.add_column("Confiance"); table.add_row(f"{estimate.price:.2f} €",estimate.price_per or "—",f"{estimate.package_quantity:g} {estimate.package_unit}" if estimate.package_quantity else "—",estimate.confidence); console.print(table)
 
 if __name__=="__main__": app()
