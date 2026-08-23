@@ -47,6 +47,24 @@ class OpenRouterProvider:
     def __init__(self, config: LLMConfig):
         self.config = config
 
+    @staticmethod
+    def _error(response: httpx.Response) -> RuntimeError:
+        try:
+            data = response.json()
+            message = data.get("error", {}).get("message") or data.get("message")
+        except (ValueError, TypeError):
+            message = None
+        if response.status_code == 401:
+            return RuntimeError(
+                "OpenRouter authentication failed (401). Check that the API key is valid, "
+                "active, and starts with 'sk-or-'."
+                + (f" OpenRouter says: {message}" if message else "")
+            )
+        return RuntimeError(
+            f"OpenRouter request failed ({response.status_code})."
+            + (f" OpenRouter says: {message}" if message else "")
+        )
+
     def generate(self, request: LLMRequest) -> str:
         if not self.config.openrouter_api_key or not self.config.openrouter_model:
             raise RuntimeError("OpenRouter requires an API key and model")
@@ -62,11 +80,15 @@ class OpenRouterProvider:
             payload["response_format"] = {"type": "json_object"}
         response = httpx.post(
             "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {self.config.openrouter_api_key}"},
+            headers={
+                "Authorization": f"Bearer {self.config.openrouter_api_key.strip()}",
+                "Content-Type": "application/json",
+            },
             json=payload,
             timeout=120,
         )
-        response.raise_for_status()
+        if not response.is_success:
+            raise self._error(response)
         return response.json()["choices"][0]["message"]["content"]
 
 
