@@ -12,6 +12,7 @@ class LLMRequest:
     prompt: str
     temperature: float = 0.2
     json_mode: bool = False
+    web_search: bool = False
 
 
 class LLMProvider(Protocol):
@@ -78,6 +79,8 @@ class OpenRouterProvider:
         }
         if request.json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if request.web_search and not request.json_mode:
+            payload["plugins"] = [{"id": "web", "max_results": 5}]
         response = httpx.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
@@ -85,7 +88,7 @@ class OpenRouterProvider:
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=120,
+            timeout=180,
         )
         if not response.is_success:
             raise self._error(response)
