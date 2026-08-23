@@ -1,11 +1,13 @@
 from pathlib import Path
 
+import keyring
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 APP_DIR = Path.home() / ".meal-organizer"
 DB_PATH = APP_DIR / "meal-organizer.db"
 CONFIG_PATH = APP_DIR / "config.toml"
+KEYRING_SERVICE = "meal-organizer/openrouter"
 
 
 class LLMConfig(BaseModel):
@@ -35,20 +37,34 @@ def ensure_app_dir() -> None:
     APP_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _get_api_key() -> str:
+    try:
+        return keyring.get_password(KEYRING_SERVICE, "api_key") or ""
+    except Exception:
+        return ""
+
+
 def load_config() -> UserConfig:
     ensure_app_dir()
     if not CONFIG_PATH.exists():
-        return UserConfig()
+        return UserConfig(llm=LLMConfig(openrouter_api_key=_get_api_key()))
     try:
         import tomllib
 
-        return UserConfig.model_validate(tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+        config = UserConfig.model_validate(tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+        config.llm.openrouter_api_key = _get_api_key()
+        return config
     except (OSError, ValueError, TypeError):
-        return UserConfig()
+        return UserConfig(llm=LLMConfig(openrouter_api_key=_get_api_key()))
 
 
 def save_config(config: UserConfig) -> None:
     ensure_app_dir()
+    if config.llm.openrouter_api_key:
+        try:
+            keyring.set_password(KEYRING_SERVICE, "api_key", config.llm.openrouter_api_key)
+        except Exception:
+            pass
     lines = [
         f'name = {config.name!r}',
         f"servings = {config.servings}",
@@ -63,6 +79,4 @@ def save_config(config: UserConfig) -> None:
         f'ollama_host = {config.llm.ollama_host!r}',
         f'openrouter_model = {config.llm.openrouter_model!r}',
     ]
-    if config.llm.openrouter_api_key:
-        lines.append(f'openrouter_api_key = {config.llm.openrouter_api_key!r}')
     CONFIG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
