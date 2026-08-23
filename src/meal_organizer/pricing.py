@@ -16,18 +16,18 @@ class PriceEstimate:
 
 
 class OpenPricesProvider:
-    """Adapter for Open Prices. API details are isolated here so the source can evolve safely."""
+    """Read-only adapter for the Open Prices REST API."""
 
     BASE_URL = "https://prices.openfoodfacts.org/api/v1"
 
-    def __init__(self, location: str = "FR"):
-        self.location = location
+    def __init__(self, country_code: str = "FR"):
+        self.country_code = country_code.upper()
 
     def estimate(self, product: str) -> PriceEstimate | None:
         try:
             response = httpx.get(
                 f"{self.BASE_URL}/prices",
-                params={"product_name": product, "country_code": self.location, "page_size": 20},
+                params={"product_name": product, "page_size": 100},
                 timeout=15,
             )
             response.raise_for_status()
@@ -35,11 +35,18 @@ class OpenPricesProvider:
         except (httpx.HTTPError, ValueError):
             return None
 
-        prices = []
-        for item in data.get("items", data.get("prices", [])):
-            value = item.get("price")
+        items = data.get("results", data.get("items", data.get("prices", [])))
+        prices: list[tuple[float, dict]] = []
+        for item in items:
+            location = item.get("location") or {}
+            item_country = (location.get("osm_address_country_code") or "").upper()
+            if item_country and item_country != self.country_code:
+                continue
+            currency = item.get("currency")
+            if currency and currency != "EUR":
+                continue
             try:
-                value = float(value)
+                value = float(item.get("price"))
             except (TypeError, ValueError):
                 continue
             if value >= 0:
@@ -51,12 +58,12 @@ class OpenPricesProvider:
         prices.sort(key=lambda x: x[0])
         values = [value for value, _ in prices]
         median = values[len(values) // 2]
-        latest = max((item for _, item in prices), key=lambda x: x.get("date", ""), default={})
+        latest = max(prices, key=lambda x: x[1].get("date", ""))[1]
         confidence = "high" if len(values) >= 8 else "medium" if len(values) >= 3 else "low"
         return PriceEstimate(
             product=product,
             price=round(median, 2),
-            currency=latest.get("currency", "EUR"),
+            currency=latest.get("currency") or "EUR",
             source="Open Prices",
             confidence=confidence,
             observed_at=latest.get("date") or datetime.now(timezone.utc).date().isoformat(),
@@ -65,8 +72,8 @@ class OpenPricesProvider:
 
 
 class PriceService:
-    def __init__(self, location: str = "FR"):
-        self.open_prices = OpenPricesProvider(location)
+    def __init__(self, country_code: str = "FR"):
+        self.open_prices = OpenPricesProvider(country_code)
 
     def estimate(self, product: str) -> PriceEstimate | None:
         return self.open_prices.estimate(product)
