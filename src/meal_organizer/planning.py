@@ -17,7 +17,7 @@ Allergies = contraintes absolues. Les aliments refusés ne doivent jamais appara
 Utilise des unités culinaires réalistes : g/ml pour les ingrédients mesurables, unité uniquement pour les aliments réellement comptés (œufs, pommes, courgettes, etc.). Pour sel, poivre, huile et épices, indique des grammes ou millilitres, jamais plusieurs « unités ».
 Ne rédige pas les recettes complètes et ne donne aucun prix. Donne uniquement nom, description et ingrédients avec quantités.
 Si la recherche web est disponible, utilise-la pour trouver des idées crédibles puis adapte-les.
-Retourne uniquement le JSON correspondant au schéma fourni.""", "recipe": "Génère une recette détaillée en français à partir du repas choisi, du stock et de la liste de courses. Respecte strictement allergies, aliments refusés, équipement et servings. Recherche sur le web si disponible et adapte une recette crédible.", "question": "Réponds en français à la question de l'utilisateur sur ce repas sans modifier le plan.", "replace": "Remplace uniquement le repas demandé en tenant compte de toute la semaine, du budget, du stock et des achats déjà prévus. Retourne uniquement un PlannedMeal JSON."},
+Retourne uniquement le JSON correspondant au schéma fourni.""", "recipe": "Génère une recette détaillée en français à partir du repas choisi, du stock et de la liste de courses. Respecte strictement allergies, aliments refusés, équipement et servings. Recherche sur le web si disponible et adapte une recette crédible.", "question": "Réponds en français à la question de l'utilisateur sur ce repas sans modifier le plan.", "replace": "Remplace uniquement le repas demandé en tenant compte de toute la semaine, du budget et des achats déjà prévus. Retourne uniquement un PlannedMeal JSON."},
     "en": {"system": """You are the Meal Organizer planning engine. Respond in English.
 First reason about a complete, coherent week before producing JSON. The budget concerns purchases actually needed, not food already owned.
 Prioritize inventory and never plan a purchase for an ingredient when normalized inventory already covers the week's requirement.
@@ -30,7 +30,7 @@ Use web research when available to find credible ideas and adapt them.
 Return only JSON matching the supplied schema.""", "recipe": "Generate a detailed recipe in English from the selected meal, inventory and shopping list. Strictly respect allergies, dislikes, equipment and servings. Search the web when available and adapt a credible recipe.", "question": "Answer the user's question about this meal in English without changing the plan.", "replace": "Replace only the requested meal while considering the whole week, budget, inventory and planned purchases. Return only a PlannedMeal JSON object."},
 }
 
-PANTRY_STAPLES = {"sel", "poivre moulu", "huile", "huile d'olive", "ail", "herbes de provence", "beurre"}
+PANTRY_STAPLES = {"sel", "poivre moulu", "huile", "huile d'olive", "huile de tournesol", "ail", "herbes de provence", "beurre"}
 
 def _inventory_payload(inventory):
     return [{"name": i.name, "quantity": i.quantity, "unit": i.unit, "location": i.location} for i in inventory]
@@ -65,34 +65,71 @@ def build_plan_request(config, inventory):
 
 def _normalise(value, unit):
     unit = unit.lower().strip()
-    if unit == "kg": return value * 1000, "g"
+    if unit in {"kg", "kilogram", "kilograms"}: return value * 1000, "g"
     if unit in {"g", "gram", "grams", "gramme", "grammes"}: return value, "g"
-    if unit == "l": return value * 1000, "ml"
+    if unit in {"l", "litre", "litres", "liter", "liters"}: return value * 1000, "ml"
     if unit in {"ml", "millilitre", "millilitres", "milliliter", "milliliters"}: return value, "ml"
-    if unit in {"unit", "units", "piece", "pieces", "pcs", "pièce", "pièces"}: return value, "unit"
+    if unit == "cl": return value * 10, "ml"
+    if unit in {"unit", "units", "piece", "pieces", "pcs", "pièce", "pièces", "unité", "unités"}: return value, "unit"
     return value, "unit"
 
+def _canonical_inventory_name(name: str) -> str:
+    value = canonical_product(name).replace("huilde", "huile")
+    aliases = {
+        "huile d olive": "huile d'olive", "huile-de-tournesol": "huile de tournesol",
+        "sel fin": "sel", "sel de table": "sel", "sel de cuisine": "sel",
+        "poivre": "poivre moulu", "oeufs": "oeuf", "pâtes": "pâtes", "pates": "pâtes",
+        "riz blanc": "riz", "riz-blanc": "riz", "blanc de poulet": "poulet",
+        "filet de poulet": "poulet", "escalope de poulet": "poulet",
+        "filet de poisson blanc": "poisson blanc", "filet de poisson": "poisson blanc",
+        "courgettes": "courgette", "carottes": "carotte", "pommes": "pomme",
+        "pommes de terre": "pomme de terre",
+    }
+    return aliases.get(value, value)
+
+def _inventory_matches(name: str, inventory):
+    wanted = _canonical_inventory_name(name)
+    return [item for item in inventory if _canonical_inventory_name(item.name) == wanted and item.quantity > 0]
+
 def _inventory_quantity(name, unit, inventory):
-    target = _normalise(0, unit)[1]; wanted = canonical_product(name); total = 0.0
-    for item in inventory:
-        if canonical_product(item.name) != wanted: continue
+    matches = _inventory_matches(name, inventory)
+    if not matches: return 0.0
+    target = _normalise(0, unit)[1]
+    total = 0.0
+    for item in matches:
         value, item_unit = _normalise(item.quantity, item.unit)
         if item_unit == target: total += value
-        elif target == "unit" and wanted in PANTRY_STAPLES and value > 0: total += 1
+        elif target == "unit" and value > 0: total += value
     return total
+
+def _stock_covers(name, required, unit, inventory) -> bool:
+    matches = _inventory_matches(name, inventory)
+    if not matches: return False
+    wanted = _canonical_inventory_name(name)
+    if wanted in PANTRY_STAPLES:
+        return True
+    target = _normalise(0, unit)[1]
+    available = 0.0
+    for item in matches:
+        value, item_unit = _normalise(item.quantity, item.unit)
+        if item_unit == target: available += value
+    return available >= required
 
 def build_shopping_list(plan, inventory, pricing=None):
     grouped = {}
     for meal in plan.meals:
         for ingredient in meal.ingredients:
             quantity, unit = _normalise(ingredient.quantity, ingredient.unit)
-            key = (canonical_product(ingredient.name), unit)
+            key = (_canonical_inventory_name(ingredient.name), unit)
             if key not in grouped: grouped[key] = {"name": ingredient.name, "quantity": 0.0, "unit": unit}
             grouped[key]["quantity"] += quantity
     result = []; pricing = pricing or PriceService()
     for item in grouped.values():
         name, unit, required = item["name"], item["unit"], item["quantity"]
-        missing = max(0.0, required - _inventory_quantity(name, unit, inventory))
+        if _stock_covers(name, required, unit, inventory):
+            continue
+        available = _inventory_quantity(name, unit, inventory)
+        missing = max(0.0, required - available)
         if missing <= 0: continue
         result.append(MealIngredient(name=name, quantity=round(missing, 2), unit=unit, estimated_cost=pricing.purchase_cost(name, missing, unit)))
     return result
