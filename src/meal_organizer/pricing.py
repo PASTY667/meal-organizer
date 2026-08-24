@@ -139,7 +139,7 @@ class PriceService:
             try: price = float(item.get("price"))
             except (TypeError, ValueError): continue
             package = self._package_from_item(item, canonical)
-            if not package or package[0] <= 0 or price <= 0: continue
+            if package is None or package[0] is None or package[0] <= 0 or price <= 0:continue
             package_value, package_unit = package
             if reference:
                 ref_value, ref_unit, ref_price = reference
