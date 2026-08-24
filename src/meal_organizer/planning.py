@@ -11,7 +11,7 @@ TEXT = {
     "fr": {
         "system": """Tu es le moteur de planification de Meal Organizer. Réponds en français.
 Construis d'abord mentalement une semaine complète et cohérente avant de produire le JSON. Le budget concerne les achats réellement nécessaires, pas les aliments déjà possédés.
-Utilise le stock fourni en priorité et ne prévois jamais l'achat d'un ingrédient si le stock couvre déjà le besoin hebdomadaire après normalisation du nom.
+Utilise le stock fourni en priorité et ne prévois jamais l'achat d'un ingrédient si le stock couvre le besoin hebdomadaire après normalisation du nom.
 Planifie exactement 14 repas : déjeuner et dîner pour chacun des 7 jours, avec des portions normales et rassasiantes.
 Réutilise intelligemment les ingrédients achetés, limite le gaspillage et garde une alimentation variée et équilibrée.
 Allergies = contraintes absolues. Les aliments refusés ne doivent jamais apparaître. N'utilise que l'équipement fourni.
@@ -45,6 +45,29 @@ def _parse_json(response: str):
     cleaned = response.strip()
     if cleaned.startswith("```"): cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     return cleaned
+
+def _coerce_plan_payload(response: str) -> dict:
+    """Accept common LLM JSON shape variations without weakening model validation."""
+    payload = json.loads(_parse_json(response))
+    if isinstance(payload, dict) and isinstance(payload.get("meals"), list):
+        meals = []
+        for item in payload["meals"]:
+            if isinstance(item, dict) and isinstance(item.get("meals"), list):
+                meals.extend(item["meals"])
+            elif isinstance(item, list):
+                meals.extend(item)
+            else:
+                meals.append(item)
+        payload["meals"] = meals
+        return payload
+    if isinstance(payload, list):
+        meals = []
+        for item in payload:
+            if isinstance(item, dict) and isinstance(item.get("meals"), list): meals.extend(item["meals"])
+            elif isinstance(item, list): meals.extend(item)
+            else: meals.append(item)
+        return {"meals": meals}
+    raise ValueError("LLM returned an invalid meal plan JSON shape")
 
 def build_plan_request(config: UserConfig, inventory: list[InventoryItem]) -> LLMRequest:
     payload = {"servings": config.servings, "weekly_budget_eur": config.weekly_budget, "language": config.language, "allergies": config.allergies, "dislikes": config.dislikes, "equipment": config.equipment, "inventory": _inventory_payload(inventory), "planning_goal": "Design the complete week first and optimize the shopping basket globally.", "schema": MealPlan.model_json_schema()}
@@ -101,7 +124,8 @@ def price_plan(plan: MealPlan, config: UserConfig, inventory: list[InventoryItem
     return plan
 
 def generate_plan(provider: LLMProvider, config: UserConfig, inventory: list[InventoryItem]) -> MealPlan:
-    plan = MealPlan.model_validate_json(_parse_json(provider.generate(build_plan_request(config, inventory))))
+    raw = provider.generate(build_plan_request(config, inventory))
+    plan = MealPlan.model_validate(_coerce_plan_payload(raw))
     if len(plan.meals) != 14: raise ValueError(f"Expected 14 meals, received {len(plan.meals)}")
     return price_plan(plan, config, inventory, enforce_budget=False)
 
