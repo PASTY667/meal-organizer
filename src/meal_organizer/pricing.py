@@ -8,11 +8,13 @@ import httpx
 
 ALIASES = {
     "blanc de poulet": "poulet", "filet de poulet": "poulet", "escalope de poulet": "poulet",
-    "riz blanc": "riz", "riz basmati": "riz", "oeufs": "oeuf", "eggs": "oeuf",
+    "riz blanc": "riz", "riz basmati": "riz", "oeufs": "oeuf", "œufs": "oeuf", "eggs": "oeuf",
     "champignons de paris": "champignons", "champignon de paris": "champignons",
     "pates": "pâtes", "spaghetti": "pâtes", "penne": "pâtes", "macaroni": "pâtes",
     "pommes de terre": "pomme de terre", "carottes": "carotte", "courgettes": "courgette",
-    "filet mignon de porc": "porc", "sauce-soja": "sauce soja", "huile d olive": "huile d'olive",
+    "filet mignon de porc": "porc", "sauce-soja": "sauce soja", "sauce soja": "sauce soja",
+    "huile d olive": "huile d'olive", "huile-de-tournesol": "huile",
+    "sel de table": "sel", "sel fin": "sel", "sel marin": "sel", "ail frais": "ail", "tête d ail": "ail",
 }
 SEARCH_TERMS = {
     "oeuf": ["oeuf", "egg"], "poulet": ["poulet", "chicken"], "riz": ["riz", "rice"],
@@ -23,10 +25,11 @@ SEARCH_TERMS = {
     "huile": ["huile", "oil"], "porc": ["porc", "pork"], "poisson blanc": ["poisson blanc", "white fish"],
     "herbes de provence": ["herbes de provence"], "pomme": ["pomme", "apple"],
     "pomme de terre": ["pomme de terre", "potato"], "brocoli": ["brocoli", "broccoli"],
-    "sel": ["sel", "salt"], "poivre moulu": ["poivre", "pepper"],
+    "sel": ["sel", "salt"], "poivre moulu": ["poivre", "pepper"], "ail": ["ail", "garlic"],
 }
 
-# Conservative French supermarket reference packages. These are fallbacks, not claimed live prices.
+# Conservative French supermarket reference packages. These are fallback estimates,
+# not claims of live prices from a particular retailer.
 REFERENCE = {
     "oeuf": (6, "unit", 2.79), "poulet": (500, "g", 5.49), "riz": (1000, "g", 2.19),
     "pâtes": (500, "g", 1.49), "champignons": (250, "g", 2.19), "courgette": (500, "g", 2.49),
@@ -35,6 +38,7 @@ REFERENCE = {
     "huile": (1000, "ml", 3.49), "porc": (500, "g", 5.99), "poisson blanc": (400, "g", 6.99),
     "herbes de provence": (20, "g", 1.29), "pomme": (1000, "g", 2.29), "pomme de terre": (1000, "g", 1.79),
     "brocoli": (500, "g", 2.49), "sel": (1000, "g", 0.89), "poivre moulu": (50, "g", 2.49),
+    "ail": (2, "unit", 3.59),
 }
 
 
@@ -81,11 +85,11 @@ class ProductOffer:
 
 
 class PriceService:
-    """Finds realistic purchase offers, then falls back to a conservative French reference basket.
+    """Estimate realistic French supermarket purchase prices.
 
-    Open Prices is used as an observed-price source when the observation can be matched to a
-    sensible package. Unknown items still receive a reference estimate so the weekly budget
-    never silently treats missing prices as zero.
+    Open Prices observations are accepted only when their unit price is close to a
+    conservative French reference range. Otherwise the reference estimate is used.
+    This prevents a single atypical observation from distorting the weekly budget.
     """
 
     BASE_URL = "https://prices.openfoodfacts.org/api/v1"
@@ -105,17 +109,12 @@ class PriceService:
 
     def _package_from_item(self, item: dict, canonical: str):
         product = item.get("product") or {}
-        candidates = [
-            (product.get("product_quantity"), product.get("product_quantity_unit")),
-            (item.get("product_quantity"), item.get("product_quantity_unit")),
-        ]
-        for quantity, unit in candidates:
+        for quantity, unit in ((product.get("product_quantity"), product.get("product_quantity_unit")), (item.get("product_quantity"), item.get("product_quantity_unit"))):
             try:
                 if quantity and unit:
                     parsed = normalise_quantity(float(quantity), str(unit))
                     if parsed: return parsed
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError): pass
         text = " ".join(str(item.get(k, "")) for k in ("product_name", "product_code", "name")).lower()
         match = re.search(r"(?:x\s*)?(\d+(?:[.,]\d+)?)\s*(kg|g|ml|cl|l)", text)
         if match:
@@ -129,9 +128,9 @@ class PriceService:
         canonical = canonical_product(product)
         terms = SEARCH_TERMS.get(canonical, [canonical, product])
         candidates = []
-        for term in dict.fromkeys(terms):
-            candidates.extend(self._fetch(term))
+        for term in dict.fromkeys(terms): candidates.extend(self._fetch(term))
         offers = []
+        reference = REFERENCE.get(canonical)
         for item in candidates:
             if (item.get("currency") or "EUR").upper() != "EUR": continue
             location = item.get("location") or {}
@@ -142,16 +141,13 @@ class PriceService:
             package = self._package_from_item(item, canonical)
             if not package or package[0] <= 0 or price <= 0: continue
             package_value, package_unit = package
-            # Reject observations that are clearly not plausible supermarket package prices.
-            reference = REFERENCE.get(canonical)
             if reference:
                 ref_value, ref_unit, ref_price = reference
-                comparable = normalise_quantity(ref_value, ref_unit)
-                observed = normalise_quantity(package_value, package_unit)
-                if comparable and observed and comparable[1] == observed[1]:
-                    expected_per_base = ref_price / comparable[0]
-                    observed_per_base = price / observed[0]
-                    if observed_per_base > expected_per_base * 4 or observed_per_base < expected_per_base * 0.20: continue
+                ref = normalise_quantity(ref_value, ref_unit); observed = normalise_quantity(package_value, package_unit)
+                if ref and observed and ref[1] == observed[1]:
+                    ref_unit_price = ref_price / ref[0]; observed_unit_price = price / observed[0]
+                    # Keep observations within a deliberately tight band around the French reference.
+                    if not (ref_unit_price * 0.55 <= observed_unit_price <= ref_unit_price * 1.75): continue
             offers.append((price, package_value, package_unit))
         if not offers: return None
         median_price = median(x[0] for x in offers)
@@ -168,15 +164,15 @@ class PriceService:
             return observed
         reference = REFERENCE.get(key)
         if reference:
-            offer = ProductOffer(key, reference[0], reference[1], reference[2], "Estimation France", "low")
+            offer = ProductOffer(key, reference[0], reference[1], reference[2], "Estimation France", "medium")
         else:
-            # Generic fallback: never return zero. A conservative pantry package is used.
             offer = ProductOffer(key, 1, "unit", 2.50, "Estimation générique", "very_low")
         self._cache[key] = offer
         return offer
 
     def purchase_cost(self, product: str, quantity: float, unit: str) -> float:
-        return self.estimate(product).purchase_cost(quantity, unit) or self.estimate(product).price
+        offer = self.estimate(product)
+        return offer.purchase_cost(quantity, unit) or offer.price
 
     def cost(self, product: str, quantity: float, unit: str) -> float:
         offer = self.estimate(product)
