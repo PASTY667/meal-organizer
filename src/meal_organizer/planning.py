@@ -9,10 +9,10 @@ from .pricing import PriceService, canonical_product
 
 TEXT = {
     "fr": {"system": """Tu es le moteur de planification de Meal Organizer. Réponds en français.
-Construis d'abord mentalement une semaine complète et cohérente avant de produire le JSON. Le budget concerne les achats réellement nécessaires, pas les aliments déjà possédés.
+Construis d'abord mentalement une semaine complète et cohérente avant de produire le JSON. Le budget est une contrainte ABSOLUE : les achats réellement nécessaires doivent rester sous le budget hebdomadaire. La variété est secondaire au respect du budget.
 Utilise le stock fourni en priorité et ne prévois jamais l'achat d'un ingrédient si le stock couvre le besoin hebdomadaire après normalisation du nom.
 Planifie exactement 14 repas : déjeuner et dîner pour chacun des 7 jours, avec des portions normales et rassasiantes.
-La variété est une contrainte majeure : évite de répéter le même plat, la même base ou le même type de repas. Pas plus de 2 repas à base d'une même source protéique principale sur la semaine sauf contrainte forte du stock/budget.
+La variété est importante mais ne doit jamais faire dépasser le budget. Privilégie les ingrédients polyvalents, les produits de saison, les œufs, légumineuses, pâtes, riz, pommes de terre, légumes abordables et viandes/poissons raisonnablement tarifés. Évite les ingrédients premium coûteux (saumon, avocat, noix, quinoa, fromages premium, etc.) sauf s'ils sont déjà en stock ou si leur coût reste compatible avec le budget.
 Évite les repas faibles ou incomplets : un repas doit comporter une source de protéines, un féculent ou légumineuse lorsque pertinent, et des légumes/fruits. Un simple yaourt, fruit, salade seule ou omelette seule n'est pas considéré comme un repas complet.
 Utilise un catalogue très large d'idées de plats simples : cuisine française, méditerranéenne, asiatique, mexicaine, indienne, moyen-orientale, plats au four, woks, currys, gratins, galettes, bowls, légumineuses et soupes consistantes, adaptés à un étudiant et réalisables avec l'équipement fourni.
 Ne répète pas les plats récemment servis : l'historique fourni contient des repas des semaines précédentes. Privilégie de nouvelles recettes et de nouvelles associations d'ingrédients.
@@ -20,13 +20,13 @@ Réutilise intelligemment les ingrédients achetés pour limiter le gaspillage, 
 Allergies = contraintes absolues. Les aliments refusés ne doivent jamais apparaître. N'utilise que l'équipement fourni.
 Utilise des unités culinaires réalistes : g/ml pour les ingrédients mesurables, unité uniquement pour les aliments réellement comptés.
 Ne rédige pas les recettes complètes et ne donne aucun prix. Donne uniquement nom, description et ingrédients avec quantités.
-Si la recherche web est disponible, utilise-la pour trouver des idées crédibles puis adapte-les.
+Si la recherche web est disponible, utilise-la pour trouver des idées crédibles puis adapte-les, mais ne remplace jamais le calcul déterministe du panier.
 Retourne uniquement le JSON correspondant au schéma fourni.""", "recipe": "Génère une recette détaillée en français à partir du repas choisi, du stock et de la liste de courses. Respecte strictement allergies, aliments refusés, équipement et portions. Recherche sur le web si disponible et adapte une recette crédible.", "question": "Réponds en français à la question de l'utilisateur sur ce repas sans modifier le plan.", "replace": "Remplace uniquement le repas demandé en tenant compte de toute la semaine, de l'historique, du budget et des achats déjà prévus. Retourne uniquement un PlannedMeal JSON."},
     "en": {"system": """You are the Meal Organizer planning engine. Respond in English.
-First reason about a complete, coherent week before producing JSON. The budget concerns purchases actually needed, not food already owned.
+First reason about a complete, coherent week before producing JSON. The weekly budget is an ABSOLUTE constraint: required purchases must remain within the weekly budget. Variety is secondary to budget compliance.
 Prioritize inventory and never plan a purchase for an ingredient when normalized inventory already covers the week's requirement.
 Plan exactly 14 meals: lunch and dinner for each of 7 days, with normal satisfying portions.
-Variety is a major constraint: avoid repeating the same dish, base or meal type. Use no more than 2 meals centered on the same main protein during the week unless stock/budget strongly requires it.
+Variety matters but must never break the budget. Prefer versatile ingredients, seasonal produce, eggs, legumes, pasta, rice, potatoes, affordable vegetables and reasonably priced meat/fish. Avoid premium ingredients such as salmon, avocado, nuts, quinoa and premium cheeses unless already in stock or clearly affordable.
 Avoid weak or incomplete meals: a meal should contain a meaningful protein source plus a starch/legume when appropriate and vegetables/fruit. A simple yogurt, fruit, salad alone or plain omelet is not a complete meal.
 Use a broad idea catalog: French, Mediterranean, Asian, Mexican, Indian, Middle Eastern food, oven dishes, woks, curries, gratins, patties, bowls, legumes and substantial soups, all adapted to a student and the provided equipment.
 Do not repeat recently served meals: the supplied history contains previous weeks. Prefer new dishes and new ingredient combinations.
@@ -34,7 +34,7 @@ Reuse purchased ingredients intelligently to reduce waste without turning the we
 Allergies are hard constraints. Disliked foods must never appear. Only use the provided equipment.
 Use realistic culinary units: g/ml for measurable ingredients, units only for foods actually counted.
 Do not write full recipes or prices. Give only name, description and ingredient quantities.
-Use web research when available to find credible ideas and adapt them.
+Use web research when available to find credible ideas, but never replace the deterministic shopping calculation.
 Return only JSON matching the supplied schema.""", "recipe": "Generate a detailed recipe in English from the selected meal, inventory and shopping list. Strictly respect allergies, dislikes, equipment and servings. Search the web when available and adapt a credible recipe.", "question": "Answer the user's question about this meal in English without changing the plan.", "replace": "Replace only the requested meal while considering the whole week, history, budget and planned purchases. Return only a PlannedMeal JSON object."},
 }
 
@@ -67,9 +67,14 @@ def _coerce_plan_payload(response: str) -> dict:
         return {"meals": meals}
     raise ValueError("LLM returned an invalid meal plan JSON shape")
 
-def build_plan_request(config, inventory, history=None):
+def build_plan_request(config, inventory, history=None, budget_feedback=None, current_plan=None):
     history = history or []
-    payload = {"servings": config.servings, "weekly_budget_eur": config.weekly_budget, "language": config.language, "allergies": config.allergies, "dislikes": config.dislikes, "equipment": config.equipment, "inventory": _inventory_payload(inventory), "recent_meals_to_avoid": history, "planning_goal": "Design the complete week first, maximize meal variety, avoid recent repeats, and optimize the shopping basket globally.", "schema": MealPlan.model_json_schema()}
+    payload = {"servings": config.servings, "weekly_budget_eur": config.weekly_budget, "language": config.language, "allergies": config.allergies, "dislikes": config.dislikes, "equipment": config.equipment, "inventory": _inventory_payload(inventory), "recent_meals_to_avoid": history, "planning_goal": "Design the complete week first, then minimize the real shopping basket. Budget compliance is the first optimization objective; variety is second.", "schema": MealPlan.model_json_schema()}
+    if budget_feedback:
+        payload["budget_feedback"] = budget_feedback
+        payload["instruction"] = "REVISE THE ENTIRE PLAN. The previous plan exceeded the hard budget. Replace expensive meals and ingredients with cheaper complete alternatives. Do not merely reduce quantities. Return exactly 14 meals."
+    if current_plan:
+        payload["previous_plan"] = current_plan.model_dump()
     return LLMRequest(system=TEXT[config.language]["system"], prompt=json.dumps(payload, ensure_ascii=False, indent=2), json_mode=True, web_search=config.llm.web_search)
 
 def _normalise(value, unit):
@@ -150,7 +155,7 @@ def build_shopping_list(plan, inventory, pricing=None):
     return result
 
 def price_plan(plan, config, inventory, enforce_budget=True, pricing=None):
-    pricing = pricing or PriceService()
+    pricing = pricing or PriceService(retailer=config.retailer)
     for meal in plan.meals:
         meal_cost = 0.0
         for ingredient in meal.ingredients:
@@ -162,9 +167,25 @@ def price_plan(plan, config, inventory, enforce_budget=True, pricing=None):
     return plan
 
 def generate_plan(provider, config, inventory, history=None):
-    raw = provider.generate(build_plan_request(config, inventory, history)); plan = MealPlan.model_validate(_coerce_plan_payload(raw))
-    if len(plan.meals) != 14: raise ValueError(f"Expected 14 meals, received {len(plan.meals)}")
-    _validate_variety(plan); return price_plan(plan, config, inventory, enforce_budget=False)
+    pricing = PriceService(retailer=config.retailer)
+    best = None
+    feedback = None
+    for attempt in range(5):
+        raw = provider.generate(build_plan_request(config, inventory, history, feedback, best)); candidate = MealPlan.model_validate(_coerce_plan_payload(raw))
+        if len(candidate.meals) != 14: raise ValueError(f"Expected 14 meals, received {len(candidate.meals)}")
+        try: _validate_variety(candidate)
+        except ValueError:
+            if attempt == 4: raise
+            feedback = "The plan failed the meal completeness/variety validation. Keep all 14 meals complete and varied while remaining within budget."
+            continue
+        price_plan(candidate, config, inventory, enforce_budget=False, pricing=pricing)
+        if best is None or candidate.shopping_cost < best.shopping_cost: best = candidate
+        if candidate.shopping_cost <= config.weekly_budget + 0.01: return candidate
+        expensive = sorted(((i.name, i.estimated_cost or 0) for i in build_shopping_list(candidate, inventory, pricing)), key=lambda x: x[1], reverse=True)[:8]
+        feedback = {"current_purchase_total_eur": candidate.shopping_cost, "maximum_budget_eur": config.weekly_budget, "over_budget_by_eur": round(candidate.shopping_cost-config.weekly_budget,2), "most_expensive_items": expensive, "instruction": "Replace expensive ingredients and meals with cheaper complete alternatives. Reuse stock and shared ingredients. Never reduce serving sizes below normal. The final basket MUST be at or below the maximum budget."}
+    if best is not None:
+        raise ValueError(f"Impossible de construire un plan sous le budget de {config.weekly_budget:.2f} € après 5 optimisations. Meilleur panier trouvé : {best.shopping_cost:.2f} €. Réduis le budget, ajoute du stock ou relance plus tard." if config.language == "fr" else f"Could not build a plan under the {config.weekly_budget:.2f} EUR budget after 5 optimizations. Best basket: {best.shopping_cost:.2f} EUR. Add stock, increase the budget, or try again later.")
+    raise ValueError("Unable to generate a valid meal plan")
 
 def build_recipe_request(config, meal, inventory, shopping):
     payload = {"servings": config.servings, "meal": meal.model_dump(), "inventory": _inventory_payload(inventory), "shopping_list": [i.model_dump() for i in shopping], "schema": Recipe.model_json_schema()}
