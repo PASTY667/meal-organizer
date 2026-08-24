@@ -30,6 +30,12 @@ def choose_language(current):
     while value not in {"fr","en"}: value=typer.prompt("Language / Langue [fr/en]",default=current).strip().lower()
     return value
 
+def choose_retailer(current,language):
+    prompt="Supermarché de référence [leclerc/intermarche/carrefour/auchan/generic]" if language=="fr" else "Reference supermarket [leclerc/intermarche/carrefour/auchan/generic]"
+    value=typer.prompt(prompt,default=current).strip().lower()
+    while value not in {"leclerc","intermarche","carrefour","auchan","generic"}: value=typer.prompt(prompt,default=current).strip().lower()
+    return value
+
 def choose_llm(current,language):
     console.print(Panel.fit("[bold]Configuration LLM[/bold]" if language=="fr" else "[bold]LLM CONFIGURATION[/bold]",border_style="cyan"))
     provider=typer.prompt("Fournisseur LLM" if language=="fr" else "LLM provider",default=current.provider).strip().lower()
@@ -48,8 +54,9 @@ def choose_llm(current,language):
 def setup():
     current=load_config(); console.print(Panel.fit("[bold]MEAL ORGANIZER[/bold]",border_style="cyan")); language=choose_language(current.language)
     name=typer.prompt("Nom" if language=="fr" else "Name",default=current.name); budget=typer.prompt("Budget hebdomadaire (€)" if language=="fr" else "Weekly budget (€)",default=current.weekly_budget,type=float); servings=typer.prompt("Personnes" if language=="fr" else "Servings",default=current.servings,type=int)
+    retailer=choose_retailer(current.retailer,language)
     allergies=typer.prompt("Allergies",default=", ".join(current.allergies)); dislikes=typer.prompt("Aliments à éviter" if language=="fr" else "Foods to avoid",default=", ".join(current.dislikes)); equipment=typer.prompt("Équipement" if language=="fr" else "Equipment",default=", ".join(current.equipment)); llm=choose_llm(current.llm,language)
-    config=UserConfig(name=name,language=language,weekly_budget=budget,servings=servings,allergies=[x.strip() for x in allergies.split(",") if x.strip()],dislikes=[x.strip() for x in dislikes.split(",") if x.strip()],equipment=[x.strip() for x in equipment.split(",") if x.strip()],llm=llm); save_config(config); Database(); ok(f"Configuration enregistrée → {ENV_PATH}" if language=="fr" else f"Configuration saved → {ENV_PATH}")
+    config=UserConfig(name=name,language=language,weekly_budget=budget,servings=servings,retailer=retailer,allergies=[x.strip() for x in allergies.split(",") if x.strip()],dislikes=[x.strip() for x in dislikes.split(",") if x.strip()],equipment=[x.strip() for x in equipment.split(",") if x.strip()],llm=llm); save_config(config); Database(); ok(f"Configuration enregistrée → {ENV_PATH}" if language=="fr" else f"Configuration saved → {ENV_PATH}")
 
 @app.command()
 def doctor():
@@ -101,19 +108,27 @@ def _show_day_recipe_menu(config,day,plan):
 def plan(resume:bool=typer.Option(False,"--resume",help="Resume the latest paused/draft plan")):
     config=load_config(); db=Database(); inventory=db.list_inventory()
     if not inventory: fail(tr(config,"no_inventory")); raise typer.Exit(1)
-    provider=create_provider(config.llm); pricing=PriceService(); saved=db.load_latest_plan() if resume else None
+    provider=create_provider(config.llm); pricing=PriceService(retailer=config.retailer)
+    saved=db.load_latest_plan() if resume else None
     if saved:
         plan_id,_,meal_plan=saved; ok("Plan repris." if config.language=="fr" else "Plan resumed.")
     else:
-        with console.status("Analyse globale de la semaine et génération du plan..." if config.language=="fr" else "Globally optimizing the week and generating the plan..."):
-            try: meal_plan=generate_plan(provider,config,inventory)
-            except Exception as exc: fail(str(exc)); raise typer.Exit(1) from exc
-        plan_id=db.save_plan(meal_plan,"draft")
+        current_week=db.has_current_week_plan()
+        if current_week[0]:
+            plan_id,_,meal_plan,created_at,_=current_week[1]; ok(f"Plan de la semaine déjà existant ({created_at[:10]}). Utilise --resume pour reprendre un brouillon." if config.language=="fr" else f"Current week's plan already exists ({created_at[:10]}). Use --resume to resume a draft.")
+        else:
+            history=db.list_recent_meal_names(limit_plans=4)
+            with console.status("Optimisation globale : budget prioritaire, puis variété..." if config.language=="fr" else "Global optimization: budget first, then variety..."):
+                try: meal_plan=generate_plan(provider,config,inventory,history=history)
+                except Exception as exc: fail(str(exc)); raise typer.Exit(1) from exc
+            plan_id=db.save_plan(meal_plan,"draft")
     while True:
         price_plan(meal_plan,config,inventory,enforce_budget=False,pricing=pricing); shopping=build_shopping_list(meal_plan,inventory,pricing)
         _show_week(config,meal_plan); _show_shopping(config,shopping,meal_plan.shopping_cost,config.weekly_budget)
         action=typer.prompt(f"Action ({tr(config,'help')})",default=tr(config,"accept")).strip(); parts=action.split(maxsplit=2); command=parts[0].casefold()
         if command in {"valider","accept","ok"}:
+            if meal_plan.shopping_cost > config.weekly_budget + 0.01:
+                fail(f"Le budget est dépassé de {meal_plan.shopping_cost-config.weekly_budget:.2f} €. Le plan ne peut pas être validé." if config.language=="fr" else f"Budget exceeded by {meal_plan.shopping_cost-config.weekly_budget:.2f} EUR. The plan cannot be accepted."); continue
             db.save_plan(meal_plan,"accepted",plan_id); ok(tr(config,"saved")); return
         if command in {"pause","p"}:
             db.save_plan(meal_plan,"paused",plan_id); ok(tr(config,"pause")); return
@@ -144,7 +159,7 @@ def recipe(day:str,meal:str):
     if not saved: fail(tr(config,"no_plan")); raise typer.Exit(1)
     plan_id,_,meal_plan=saved; target=_meal_for(meal_plan,day,meal)
     if not target: fail("Repas introuvable." if config.language=="fr" else "Meal not found."); raise typer.Exit(1)
-    inventory=db.list_inventory(); shopping=build_shopping_list(meal_plan,inventory); provider=create_provider(config.llm)
+    inventory=db.list_inventory(); shopping=build_shopping_list(meal_plan,inventory,PriceService(retailer=config.retailer)); provider=create_provider(config.llm)
     with console.status("Recherche de recettes et génération..." if config.language=="fr" else "Researching recipes and generating..."):
         generated=generate_recipe(provider,config,target,inventory,shopping)
     key=f"{target.day}:{target.meal}"; db.save_recipe(plan_id,key,generated)
@@ -159,7 +174,7 @@ def cook(day:str,meal:str):
     if not target: fail("Repas introuvable." if config.language=="fr" else "Meal not found."); raise typer.Exit(1)
     key=f"{target.day}:{target.meal}"; recipe_data=db.load_recipe(plan_id,key)
     if not recipe_data:
-        inventory=db.list_inventory(); shopping=build_shopping_list(meal_plan,inventory)
+        inventory=db.list_inventory(); shopping=build_shopping_list(meal_plan,inventory,PriceService(retailer=config.retailer))
         with console.status("Génération de la recette..." if config.language=="fr" else "Generating recipe..."): recipe_data=generate_recipe(create_provider(config.llm),config,target,inventory,shopping)
         db.save_recipe(plan_id,key,recipe_data)
     console.print(Panel(f"[bold]{recipe_data.name}[/bold]",title=tr(config,"cook"),border_style="yellow"))
@@ -172,8 +187,8 @@ def cook(day:str,meal:str):
 
 @app.command()
 def price(product:str):
-    config=load_config(); estimate=PriceService().estimate(product)
-    if not estimate: fail("Aucun prix externe fiable trouvé." if config.language=="fr" else "No reliable external price found."); raise typer.Exit(1)
-    table=Table(title=f"Prix — {product}"); table.add_column("Prix"); table.add_column("Unité"); table.add_column("Conditionnement"); table.add_column("Confiance"); table.add_row(f"{estimate.price:.2f} €",estimate.price_per or "—",f"{estimate.package_quantity:g} {estimate.package_unit}" if estimate.package_quantity else "—",estimate.confidence); console.print(table)
+    config=load_config(); estimate=PriceService(retailer=config.retailer).estimate(product)
+    table=Table(title=f"Prix — {product}"); table.add_column("Prix"); table.add_column("Unité"); table.add_column("Conditionnement"); table.add_column("Source"); table.add_column("Confiance")
+    table.add_row(f"{estimate.price:.2f} €",estimate.price_per or "—",f"{estimate.package_quantity:g} {estimate.package_unit}" if estimate.package_quantity else "—",estimate.source,estimate.confidence); console.print(table)
 
 if __name__=="__main__": app()
